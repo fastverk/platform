@@ -1,0 +1,33 @@
+# service-finder-client — thin reusable client for the fastverk.finder.v1.Finder.
+#
+# In-cluster Rust consumers (botnoc discovery.rs, controlplane rbe.rs, …) depend
+# on this crate as a git-dep to resolve capabilities WITHOUT a kube client of
+# their own. `Watched` keeps a live, last-known-good snapshot so discovery is off
+# the request hot path and survives finder restarts.
+[package]
+name = "service-finder-client"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Client library for the fastverk service-finder (fastverk.finder.v1.Finder)."
+
+[lib]
+name = "service_finder_client"
+path = "src/lib.rs"
+
+[dependencies]
+tonic = "0.12"
+prost = "0.13"
+tokio = { version = "1.40", features = ["rt", "macros", "sync", "time"] }
+tokio-stream = "0.1"
+futures = "0.3"
+anyhow = "1.0"
+tracing = "0.1"
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -1,0 +1,39 @@
+replicaCount: 1
+
+# aion-dev EKS pulls from the aion-dev PRIVATE ECR. Image built + pushed from this
+# repo (Dockerfile buildx now; //:service-finder-image_push once RBE-wired).
+image:
+  repository: 042825952740.dkr.ecr.us-east-1.amazonaws.com/service-finder
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# gRPC bind port (fastverk.finder.v1.Finder). Clients dial
+# http://service-finder.<ns>.svc.cluster.local:<grpcPort>.
+grpcPort: 50060
+
+logLevel: "service_finder=info,info"
+
+# Namespace the finder discovers Services in. Empty ⇒ the pod's own namespace
+# (via the downward API). Set to a fixed namespace for cross-namespace discovery
+# (then widen the RBAC below to a ClusterRole).
+discoveryNamespace: ""
+
+serviceAccount:
+  create: true
+  name: ""
+
+# The finder's only privilege: read Services (its backing store) in its namespace.
+rbac:
+  create: true
+
+# ClusterIP: consumers reach it over Service DNS.
+service:
+  type: ClusterIP
+  annotations: {}
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi

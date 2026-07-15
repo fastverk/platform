@@ -1,0 +1,66 @@
+# service-finder — capability-based service discovery daemon + client lib.
+#
+# Root crate = the `service-finder-server` daemon + the `service_finder` library
+# (resolver/registry/service). `client/rust` is the thin reusable client lib that
+# in-cluster Rust consumers (e.g. botnoc's discovery.rs, controlplane rbe.rs) dial
+# the finder with. Both compile `proto/fastverk/finder/v1/finder.proto` via
+# tonic-build under Cargo AND Bazel.
+[workspace]
+members = ["client/rust"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.95.0"
+license = "MIT"
+repository = "https://github.com/fastverk/service-finder"
+
+[package]
+name = "service-finder"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Semantic / capability-based service discovery for fastverk (fastverk.finder.v1.Finder)."
+
+[lib]
+name = "service_finder"
+path = "src/lib.rs"
+
+[[bin]]
+name = "service-finder-server"
+path = "src/main.rs"
+
+[dependencies]
+tonic = "0.12"
+tonic-health = "0.12"
+tonic-reflection = "0.12"
+prost = "0.13"
+tokio = { version = "1.40", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-stream = "0.3"
+
+# Kubernetes: watch/reflect Services labeled finder.fastverk.dev/capability.
+kube = { version = "0.99", default-features = false, features = [
+    "client",
+    "rustls-tls",
+    "runtime",
+] }
+k8s-openapi = { version = "0.24", features = ["latest"] }
+# kube's TLS uses rustls; install the aws-lc-rs provider once (fastverk standard).
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+
+clap = { version = "4.5", features = ["derive", "env"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[lints.rust]
+unsafe_code = "forbid"

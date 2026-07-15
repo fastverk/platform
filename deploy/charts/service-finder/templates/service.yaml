@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "service-finder.fullname" . }}
+  labels:
+    {{- include "service-finder.labels" . | nindent 4 }}
+    fastverk.dev/service: service-finder
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "service-finder.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: grpc
+      port: {{ .Values.grpcPort }}
+      targetPort: grpc
+      protocol: TCP
