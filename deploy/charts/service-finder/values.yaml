@@ -1,4 +1,10 @@
-replicaCount: 1
+# ≥2: the finder is on the console's critical path — botnoc-web and plugin-chat
+# resolve their plugin fleet from it AT BOOT, so if it is unavailable when they
+# start they fall back to env and come up degraded (missing plugins) until
+# restarted. It is stateless (a Service cache rebuilt from the API server), so
+# extra replicas are cheap. Longer term, consumers should hold a Watch (the client
+# lib's `Watched`) so a finder blip self-heals instead of persisting until restart.
+replicaCount: 2
 
 # Published publicly to GHCR by .github/workflows/publish.yml, so ANY project
 # (fastverk, aion, another cluster) can pull with no registry auth. Override
