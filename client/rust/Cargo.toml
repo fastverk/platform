@@ -6,7 +6,7 @@
 # the request hot path and survives finder restarts.
 [package]
 name = "service-finder-client"
-version = "0.0.2"
+version = "0.0.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -26,13 +26,6 @@ futures = "0.3"
 anyhow = "1.0"
 tracing = "0.1"
 
-[build-dependencies]
-tonic-build = "0.12"
-# Ship a protoc with the crate so build.rs needs NOTHING from the consumer's
-# environment. Without this, any consumer building this crate through Bazel
-# (crate_universe auto-generates its BUILD without protoc) or on a machine with no
-# protoc fails with "Could not find `protoc`" — a library must not impose that.
-protoc-bin-vendored = "3"
 
 [lints.rust]
 unsafe_code = "forbid"

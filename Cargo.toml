@@ -1,12 +1,13 @@
 # service-finder — capability-based service discovery daemon + client lib.
 #
 # Root crate = the `service-finder-server` daemon + the `service_finder` library
-# (resolver/registry/service). `client/rust` is the thin reusable client lib that
-# in-cluster Rust consumers (e.g. botnoc's discovery.rs, controlplane rbe.rs) dial
-# the finder with. Both compile `proto/fastverk/finder/v1/finder.proto` via
-# tonic-build under Cargo AND Bazel.
+# (resolver/registry/service); it compiles the proto via build.rs/tonic-build.
+# `client/rust` is the thin reusable client lib consumers dial the finder with —
+# it ships CHECKED-IN generated stubs (no build.rs) so it needs no protoc/proto/
+# bazel annotation anywhere; `tools/codegen` regenerates them and the
+# codegen-drift workflow fails if they go stale.
 [workspace]
-members = ["client/rust"]
+members = ["client/rust", "tools/codegen"]
 
 [workspace.package]
 edition = "2021"

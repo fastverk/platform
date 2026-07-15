@@ -17,8 +17,16 @@ use tokio::sync::watch;
 use tokio_stream::StreamExt;
 
 /// Generated `fastverk.finder.v1` client + message types.
+///
+/// The generated code is CHECKED IN (`src/generated/`) rather than produced by a
+/// build script, so this crate builds with **zero consumer wiring**: no protoc, no
+/// .proto file, no crate_universe annotation. That matters because a consumer's
+/// Bazel build vendors only this package's directory (not the repo's `proto/`) and
+/// auto-generates a BUILD with no protoc — a build.rs here is unbuildable there.
+/// `.github/workflows/codegen-drift.yml` regenerates from the canonical
+/// `proto/fastverk/finder/v1/finder.proto` and fails if this is stale.
 pub mod pb {
-    tonic::include_proto!("fastverk.finder.v1");
+    include!("generated/fastverk.finder.v1.rs");
 }
 
 pub use pb::Endpoint;
