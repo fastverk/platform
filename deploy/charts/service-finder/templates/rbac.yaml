@@ -13,6 +13,10 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "watch"]
+  # EndpointGroup policy CRs (the named match + ordering layer).
+  - apiGroups: ["finder.fastverk.dev"]
+    resources: ["endpointgroups"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

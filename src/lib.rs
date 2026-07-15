@@ -16,6 +16,7 @@ pub mod pb {
 /// The proto file-descriptor set, for gRPC server reflection (grpcurl et al.).
 pub const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("finder_descriptor");
 
+pub mod groups;
 pub mod registry;
 pub mod resolver;
 pub mod service;

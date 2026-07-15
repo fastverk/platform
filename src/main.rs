@@ -10,8 +10,10 @@ use clap::Parser;
 use tonic::transport::Server;
 use tonic_health::server::health_reporter;
 
+use service_finder::groups::GroupCache;
 use service_finder::pb::finder_server::FinderServer;
 use service_finder::registry::Registry;
+use service_finder::resolver::default_aliases;
 use service_finder::service::FinderService;
 
 #[derive(Parser, Debug)]
@@ -47,8 +49,12 @@ async fn main() -> anyhow::Result<()> {
         .namespace
         .unwrap_or_else(|| client.default_namespace().to_string());
 
-    let registry = Registry::spawn(client, ns).await?;
-    let finder = FinderService::new(registry);
+    // Legacy-label aliases (e.g. fastverk.dev/plugin → capability=console-plugin)
+    // make already-labeled fleets discoverable without re-stamping.
+    let registry = Registry::spawn(client.clone(), ns.clone(), default_aliases()).await?;
+    // EndpointGroup policy cache (named match + ordering); tolerates an absent CRD.
+    let groups = GroupCache::spawn(client, ns).await;
+    let finder = FinderService::new(registry, groups);
 
     // Mark the Finder service SERVING for k8s grpc health probes.
     let (mut health, health_service) = health_reporter();

@@ -7,19 +7,22 @@ use futures::Stream;
 use tokio::sync::broadcast::error::RecvError;
 use tonic::{Request, Response, Status};
 
+use crate::groups::GroupCache;
 use crate::pb::finder_server::Finder;
 use crate::pb::{
-    watch_event, ResolveRequest, ResolveResponse, WatchEvent, WatchRequest,
+    watch_event, ResolveGroupRequest, ResolveGroupResponse, ResolveRequest, ResolveResponse,
+    WatchEvent, WatchGroupRequest, WatchRequest,
 };
 use crate::registry::Registry;
 
 pub struct FinderService {
     reg: Registry,
+    groups: GroupCache,
 }
 
 impl FinderService {
-    pub fn new(reg: Registry) -> Self {
-        Self { reg }
+    pub fn new(reg: Registry, groups: GroupCache) -> Self {
+        Self { reg, groups }
     }
 }
 
@@ -84,6 +87,65 @@ impl Finder for FinderService {
                         }
                     }
                     Err(RecvError::Closed) => break,
+                }
+            }
+        };
+
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn resolve_group(
+        &self,
+        request: Request<ResolveGroupRequest>,
+    ) -> Result<Response<ResolveGroupResponse>, Status> {
+        let name = request.into_inner().name;
+        if name.is_empty() {
+            return Err(Status::invalid_argument("name is required"));
+        }
+        let Some(spec) = self.groups.get(&name) else {
+            return Err(Status::not_found(format!("no EndpointGroup {name:?}")));
+        };
+        let endpoints = self.reg.resolve_group(&spec);
+        tracing::debug!(group = %name, ordering = ?spec.ordering, matched = endpoints.len(), "resolve_group");
+        Ok(Response::new(ResolveGroupResponse { endpoints }))
+    }
+
+    type WatchGroupStream = Pin<Box<dyn Stream<Item = WatchResult> + Send + 'static>>;
+
+    async fn watch_group(
+        &self,
+        request: Request<WatchGroupRequest>,
+    ) -> Result<Response<Self::WatchGroupStream>, Status> {
+        let name = request.into_inner().name;
+        if name.is_empty() {
+            return Err(Status::invalid_argument("name is required"));
+        }
+        let reg = self.reg.clone();
+        let groups = self.groups.clone();
+        // Wake on EITHER the Service cache changing OR the group's own policy
+        // changing (a group can appear/disappear/retune after subscribe).
+        let mut svc_rx = reg.subscribe();
+        let mut grp_rx = groups.subscribe();
+
+        let stream = async_stream::stream! {
+            let snapshot = groups.get(&name).map(|s| reg.resolve_group(&s)).unwrap_or_default();
+            let mut last = snapshot.clone();
+            yield Ok::<WatchEvent, Status>(WatchEvent {
+                r#type: watch_event::Type::Snapshot as i32,
+                endpoints: snapshot,
+            });
+            loop {
+                tokio::select! {
+                    r = svc_rx.recv() => if matches!(r, Err(RecvError::Closed)) { break; },
+                    r = grp_rx.recv() => if matches!(r, Err(RecvError::Closed)) { break; },
+                }
+                let current = groups.get(&name).map(|s| reg.resolve_group(&s)).unwrap_or_default();
+                if current != last {
+                    last = current.clone();
+                    yield Ok(WatchEvent {
+                        r#type: watch_event::Type::Changed as i32,
+                        endpoints: current,
+                    });
                 }
             }
         };

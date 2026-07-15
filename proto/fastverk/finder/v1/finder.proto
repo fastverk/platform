@@ -85,6 +85,25 @@ message WatchEvent {
   repeated Endpoint endpoints = 2;
 }
 
+// ── EndpointGroups: a named, declarative match + ordering policy ─────────────
+// An EndpointGroup CR (finder.fastverk.dev/v1) names a (capability, selector,
+// ordering) tuple so consumers reference a stable name instead of encoding match
+// criteria + ordering in code — the platform can retune without redeploying them.
+// The group holds POLICY only; the finder resolves it LIVE against the same
+// Service cache (nothing is materialized). Ordering ("Priority") gives
+// primary→fallback / canary that the flat Resolve cannot express.
+message ResolveGroupRequest {
+  // The EndpointGroup name.
+  string name = 1;
+}
+message ResolveGroupResponse {
+  // Endpoints in the group's policy order.
+  repeated Endpoint endpoints = 1;
+}
+message WatchGroupRequest {
+  string name = 1;
+}
+
 service Finder {
   // One-shot resolve. Backed by a live cache of labeled Services (informer), so
   // this is a local lookup — off the network hot path.
@@ -94,4 +113,12 @@ service Finder {
   // endpoint set changes. Replaces the boot-once/no-Watch limitation of the
   // in-process finders (e.g. discovery.rs polls only at startup).
   rpc Watch(WatchRequest) returns (stream WatchEvent);
+
+  // Resolve a named EndpointGroup (ordered per its policy). NotFound if no such
+  // group. Empty endpoints (not an error) when the group matches nothing.
+  rpc ResolveGroup(ResolveGroupRequest) returns (ResolveGroupResponse);
+
+  // Live stream of a named group: SNAPSHOT then CHANGED when either the matching
+  // Services OR the group's own policy change.
+  rpc WatchGroup(WatchGroupRequest) returns (stream WatchEvent);
 }

@@ -28,6 +28,52 @@ pub const ENDPOINT_ANNOTATION: &str = "finder.fastverk.dev/endpoint";
 /// Advertised selector attributes: key → one-or-more values.
 type Advertised = BTreeMap<String, Vec<String>>;
 
+/// A legacy label the finder treats AS a capability, so Services that already
+/// carry a domain label become discoverable without being re-stamped. E.g.
+/// `fastverk.dev/plugin=forge` ⇒ capability "console-plugin" with an injected
+/// selector `{plugin: "forge"}` — so the whole console plugin fleet is resolvable
+/// via `Resolve("console-plugin", {plugin: id})` with zero plugin-chart changes.
+#[derive(Clone, Debug)]
+pub struct LabelAlias {
+    /// The existing label key on the Service (e.g. "fastverk.dev/plugin").
+    pub label: String,
+    /// The capability it maps to (e.g. "console-plugin").
+    pub capability: String,
+    /// The selector attribute the label's value is injected as (e.g. "plugin").
+    pub selector_key: String,
+}
+
+/// Built-in aliases. The console plugin fleet already labels its Services
+/// `fastverk.dev/plugin=<id>` (via each chart's `_helpers.tpl`), so the finder
+/// serves them as `console-plugin` out of the box.
+pub fn default_aliases() -> Vec<LabelAlias> {
+    vec![LabelAlias {
+        label: "fastverk.dev/plugin".to_string(),
+        capability: "console-plugin".to_string(),
+        selector_key: "plugin".to_string(),
+    }]
+}
+
+/// Does `svc` serve `capability` — directly via the capability label, or via an
+/// alias label? Returns the extra selector attributes an alias injects (empty for
+/// a direct match), or None if the Service doesn't serve the capability at all.
+fn capability_extra(svc: &Service, aliases: &[LabelAlias], capability: &str) -> Option<Advertised> {
+    if svc.labels().get(CAPABILITY_LABEL).map(String::as_str) == Some(capability) {
+        return Some(Advertised::new());
+    }
+    for a in aliases {
+        if a.capability != capability {
+            continue;
+        }
+        if let Some(v) = svc.labels().get(&a.label) {
+            let mut extra = Advertised::new();
+            extra.insert(a.selector_key.clone(), vec![v.clone()]);
+            return Some(extra);
+        }
+    }
+    None
+}
+
 /// Parse the selectors annotation JSON into `key → values`. Tolerant: a missing
 /// or malformed annotation yields an empty map (the Service then matches only the
 /// empty selector), never an error — resolution must not fail on one bad CR.
@@ -84,16 +130,20 @@ fn flatten(advertised: &Advertised) -> HashMap<String, String> {
 pub fn service_endpoints(
     svc: &Service,
     ns: &str,
+    aliases: &[LabelAlias],
     capability: &str,
     query: &BTreeMap<String, String>,
     port_name: &str,
 ) -> Vec<Endpoint> {
-    // Capability gate (the cache is label-filtered, but re-check for safety +
-    // to support a value-less "label exists" watch feeding multiple capabilities).
-    if svc.labels().get(CAPABILITY_LABEL).map(String::as_str) != Some(capability) {
+    // Capability gate: served directly (finder.fastverk.dev/capability) or via a
+    // legacy-label alias (which injects an extra selector, e.g. {plugin: forge}).
+    let Some(extra) = capability_extra(svc, aliases, capability) else {
         return Vec::new();
+    };
+    let mut advertised = parse_selectors(svc.annotations().get(SELECTORS_ANNOTATION));
+    for (k, v) in extra {
+        advertised.entry(k).or_insert(v);
     }
-    let advertised = parse_selectors(svc.annotations().get(SELECTORS_ANNOTATION));
     if !selector_matches(query, &advertised) {
         return Vec::new();
     }
@@ -139,17 +189,65 @@ pub fn service_endpoints(
 pub fn resolve<'a>(
     services: impl IntoIterator<Item = &'a Service>,
     ns: &str,
+    aliases: &[LabelAlias],
     capability: &str,
     query: &BTreeMap<String, String>,
     port_name: &str,
 ) -> Vec<Endpoint> {
     let mut out = Vec::new();
     for svc in services {
-        out.extend(service_endpoints(svc, ns, capability, query, port_name));
+        out.extend(service_endpoints(svc, ns, aliases, capability, query, port_name));
     }
     // Stable order (by url) so Watch can dedupe unchanged snapshots cheaply.
     out.sort_by(|a, b| a.url.cmp(&b.url));
     out
+}
+
+/// Annotation on a backing Service giving its ordering priority (ascending int;
+/// lower = earlier). Read by EndpointGroups with Ordering::Priority.
+pub const PRIORITY_ANNOTATION: &str = "finder.fastverk.dev/priority";
+
+/// How an EndpointGroup orders its resolved endpoints. Ordering is POLICY (it
+/// lives in the group CR); the finder applies it at resolve time — endpoints are
+/// never materialized into etcd.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Ordering {
+    /// Stable by url (the flat `resolve` default) — no primary/fallback notion.
+    #[default]
+    Unordered,
+    /// Ascending integer read from each backing Service's priority annotation
+    /// (missing ⇒ last); ties broken by url. Gives primary→fallback / canary.
+    Priority,
+}
+
+/// Order a resolved endpoint set per `ordering`. `priority_of` supplies each
+/// endpoint's priority (from its backing Service's annotation) — injected so this
+/// stays pure and unit-testable. Returns a new ordered Vec.
+pub fn order_endpoints(
+    mut endpoints: Vec<Endpoint>,
+    ordering: &Ordering,
+    priority_of: impl Fn(&Endpoint) -> i64,
+) -> Vec<Endpoint> {
+    match ordering {
+        Ordering::Unordered => endpoints.sort_by(|a, b| a.url.cmp(&b.url)),
+        Ordering::Priority => {
+            endpoints.sort_by(|a, b| {
+                priority_of(a)
+                    .cmp(&priority_of(b))
+                    .then_with(|| a.url.cmp(&b.url))
+            });
+        }
+    }
+    endpoints
+}
+
+/// Parse a Service's priority annotation to an int (missing/invalid ⇒ i64::MAX so
+/// it sorts last).
+pub fn priority_of_service(svc: &Service) -> i64 {
+    svc.annotations()
+        .get(PRIORITY_ANNOTATION)
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
@@ -221,7 +319,7 @@ mod tests {
                 &[("grpc", 50060)],
             ),
         ];
-        let out = resolve(&services, "fastverk", "ast-parser", &q(&[("ext", ".rs")]), "grpc");
+        let out = resolve(&services, "fastverk", &[], "ast-parser", &q(&[("ext", ".rs")]), "grpc");
         assert_eq!(out.len(), 1);
         assert_eq!(
             out[0].url,
@@ -239,7 +337,7 @@ mod tests {
             svc("plugin-depot", Some("console-plugin"), None, None, &[("http", 8080)]),
             svc("unrelated", Some("ast-parser"), None, None, &[("http", 9000)]),
         ];
-        let out = resolve(&services, "fastverk", "console-plugin", &BTreeMap::new(), "http");
+        let out = resolve(&services, "fastverk", &[], "console-plugin", &BTreeMap::new(), "http");
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|e| e.port_name == "http"));
     }
@@ -253,14 +351,14 @@ mod tests {
             None,
             &[("grpc", 50060)],
         )];
-        let out = resolve(&services, "fastverk", "ast-parser", &q(&[("ext", ".go")]), "grpc");
+        let out = resolve(&services, "fastverk", &[], "ast-parser", &q(&[("ext", ".go")]), "grpc");
         assert!(out.is_empty());
     }
 
     #[test]
     fn wrong_capability_skipped() {
         let services = vec![svc("x", Some("graphd"), None, None, &[("grpc", 50051)])];
-        assert!(resolve(&services, "ns", "ast-parser", &BTreeMap::new(), "").is_empty());
+        assert!(resolve(&services, "ns", &[], "ast-parser", &BTreeMap::new(), "").is_empty());
     }
 
     #[test]
@@ -273,12 +371,12 @@ mod tests {
             &[("grpc", 50051)],
         )];
         // No port_name → the override is returned.
-        let out = resolve(&services, "ns", "graphd", &q(&[("repo", "fastverk/botnoc")]), "");
+        let out = resolve(&services, "ns", &[], "graphd", &q(&[("repo", "fastverk/botnoc")]), "");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].url, "https://graphd.example.com:443");
         assert_eq!(out[0].port_name, "");
         // A named-port query can't be satisfied by a raw-URL override.
-        assert!(resolve(&services, "ns", "graphd", &BTreeMap::new(), "grpc").is_empty());
+        assert!(resolve(&services, "ns", &[], "graphd", &BTreeMap::new(), "grpc").is_empty());
     }
 
     #[test]
@@ -290,7 +388,7 @@ mod tests {
             None,
             &[("http", 8080), ("grpc", 50053)],
         )];
-        let out = resolve(&services, "fastverk", "console-plugin", &BTreeMap::new(), "");
+        let out = resolve(&services, "fastverk", &[], "console-plugin", &BTreeMap::new(), "");
         assert_eq!(out.len(), 2); // both named ports
     }
 
@@ -305,17 +403,77 @@ mod tests {
         )];
         // both keys satisfied
         assert_eq!(
-            resolve(&services, "ns", "ast-parser", &q(&[("ext", ".rs"), ("language", "rust")]), "grpc").len(),
+            resolve(&services, "ns", &[], "ast-parser", &q(&[("ext", ".rs"), ("language", "rust")]), "grpc").len(),
             1
         );
         // one key wrong → no match
         assert!(resolve(
             &services,
             "ns",
+            &[],
             "ast-parser",
             &q(&[("ext", ".rs"), ("language", "go")]),
             "grpc"
         )
         .is_empty());
+    }
+
+    #[test]
+    fn label_alias_makes_plugin_fleet_discoverable() {
+        // A plugin Service carries only the legacy `fastverk.dev/plugin` label —
+        // no finder.fastverk.dev/* — yet resolves as capability "console-plugin"
+        // with an injected {plugin: <id>} selector, via the default alias.
+        let mut s = Service::default();
+        s.metadata.name = Some("plugin-forge".to_string());
+        let mut labels = BTreeMap::new();
+        labels.insert("fastverk.dev/plugin".to_string(), "forge".to_string());
+        s.metadata.labels = Some(labels);
+        s.spec = Some(ServiceSpec {
+            ports: Some(vec![ServicePort {
+                name: Some("http".to_string()),
+                port: 8080,
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        let services = vec![s];
+        let aliases = default_aliases();
+
+        // resolves the whole fleet (empty selector)
+        let all = resolve(&services, "fastverk", &aliases, "console-plugin", &BTreeMap::new(), "http");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].url, "http://plugin-forge.fastverk.svc.cluster.local:8080");
+        assert_eq!(all[0].attributes.get("plugin").unwrap(), "forge");
+
+        // resolves a specific plugin by the injected selector
+        let one = resolve(&services, "fastverk", &aliases, "console-plugin", &q(&[("plugin", "forge")]), "http");
+        assert_eq!(one.len(), 1);
+        // wrong plugin id → nothing
+        assert!(resolve(&services, "fastverk", &aliases, "console-plugin", &q(&[("plugin", "depot")]), "http").is_empty());
+        // without the alias, the legacy label is invisible
+        assert!(resolve(&services, "fastverk", &[], "console-plugin", &BTreeMap::new(), "http").is_empty());
+    }
+
+    #[test]
+    fn priority_ordering_puts_lowest_first() {
+        let eps = vec![
+            Endpoint { url: "http://fallback:1".into(), ..Default::default() },
+            Endpoint { url: "http://primary:1".into(), ..Default::default() },
+            Endpoint { url: "http://nopri:1".into(), ..Default::default() },
+        ];
+        // primary=0, fallback=10, nopri=MAX (missing) → primary, fallback, nopri
+        let pri = |e: &Endpoint| match e.url.as_str() {
+            u if u.contains("primary") => 0,
+            u if u.contains("fallback") => 10,
+            _ => i64::MAX,
+        };
+        let ordered = order_endpoints(eps.clone(), &Ordering::Priority, pri);
+        let urls: Vec<_> = ordered.iter().map(|e| e.url.as_str()).collect();
+        assert_eq!(urls, ["http://primary:1", "http://fallback:1", "http://nopri:1"]);
+
+        // Unordered = stable by url
+        let un = order_endpoints(eps, &Ordering::Unordered, pri);
+        let urls: Vec<_> = un.iter().map(|e| e.url.as_str()).collect();
+        assert_eq!(urls, ["http://fallback:1", "http://nopri:1", "http://primary:1"]);
     }
 }
