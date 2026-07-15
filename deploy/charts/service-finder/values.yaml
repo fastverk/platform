@@ -1,9 +1,10 @@
 replicaCount: 1
 
-# aion-dev EKS pulls from the aion-dev PRIVATE ECR. Image built + pushed from this
-# repo (Dockerfile buildx now; //:service-finder-image_push once RBE-wired).
+# Published publicly to GHCR by .github/workflows/publish.yml, so ANY project
+# (fastverk, aion, another cluster) can pull with no registry auth. Override
+# `image.repository` to mirror into a private registry (e.g. ECR) if preferred.
 image:
-  repository: 042825952740.dkr.ecr.us-east-1.amazonaws.com/service-finder
+  repository: ghcr.io/fastverk/service-finder
   tag: "latest"
   pullPolicy: IfNotPresent
 

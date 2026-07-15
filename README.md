@@ -82,20 +82,37 @@ Resolve("graphd", {"repo": "fastverk/botnoc"}, port="grpc")
   gRPC :50060) + ServiceAccount + a Role granting only `list`/`watch` on
   `services`. `helm lint` clean.
 
+## Published artifacts
+
+Everything is published **publicly to GHCR** (`.github/workflows/publish.yml`), so
+any project — fastverk, aion, another cluster — consumes the finder with **no AWS
+or registry auth**:
+
+| artifact | reference |
+|---|---|
+| image | `ghcr.io/fastverk/service-finder:<sha12>` (also `:latest`) |
+| chart | `oci://ghcr.io/fastverk/charts/service-finder --version 0.1.0-<sha12>` |
+| Rust client | cargo git-dep on this repo, tag `service-finder-client-v0.0.1` |
+
+Deploy anywhere:
+
+```
+helm install service-finder \
+  oci://ghcr.io/fastverk/charts/service-finder --version 0.1.0-<sha12> \
+  -n <ns> --set discoveryNamespace=<ns>
+```
+
+See [docs/consuming.md](docs/consuming.md) for the producer/consumer guide and the
+cross-project (aion) deployment models.
+
 ## Build
 
 ```
 cargo build --workspace && cargo test        # green
 helm lint deploy/charts/service-finder       # green
+docker buildx build --platform linux/amd64 -t ghcr.io/fastverk/service-finder:dev .
 ```
 
-Image (immediate path, from a Mac):
-
-```
-docker buildx build --platform linux/amd64 \
-  -t 042825952740.dkr.ecr.us-east-1.amazonaws.com/service-finder:<sha> --push .
-```
-
-The house style is a Bazel-built OCI image (`//:service-finder-image_push`,
-`tools/oci` + `--config=rbe`), wired exactly like `forge`/`agents`; standing that
-up on RBE is a follow-up (the Dockerfile is the interim path).
+A Bazel-native OCI image target (`//:service-finder-image_push`, `tools/oci` +
+`--config=rbe`) exists for parity with the sibling repos; the published image is
+built from the Dockerfile by the publish workflow.
