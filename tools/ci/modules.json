@@ -1,0 +1,33 @@
+{
+  "_comment": "Optional per-module CI overrides. Default bazel command is 'test //... --test_output=errors' on ubuntu-latest and macos-latest. Exit 4 falls back to build //.... Commands mirror each source repo's existing gate (forge/tracker/wave ci.yml; service-finder codegen-drift.yml + bazel tests that exist in-tree). Directory keys match on-disk prefixes (service-finder, not service_finder).",
+  "forge": {
+    "bazel_by_os": {
+      "ubuntu-latest": "test //... --test_output=errors",
+      "macos-latest": "test //:forge_test --test_output=errors"
+    }
+  },
+  "tracker": {
+    "bazel_by_os": {
+      "ubuntu-latest": "test //... --test_output=errors",
+      "macos-latest": "test //:tracker_test //:conformance --test_output=errors"
+    }
+  },
+  "service-finder": {
+    "bazel_by_os": {
+      "ubuntu-latest": "test //... --test_output=errors",
+      "macos-latest": "test //:service_finder_test --test_output=errors"
+    },
+    "setup_protoc": true,
+    "extra": [
+      {
+        "cmd": "cargo run -q -p codegen && git diff --quiet -- client/rust/src/generated",
+        "workdir": ".",
+        "os": "ubuntu-latest",
+        "setup_protoc": true
+      }
+    ]
+  },
+  "wave": {
+    "bazel": "test //... --test_output=errors"
+  }
+}

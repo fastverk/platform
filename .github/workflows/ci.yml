@@ -1,0 +1,128 @@
+# One vehicle-level workflow. Git repo ≠ Bazel module: each job cd's into an
+# imported subdirectory and runs that module's existing ci.yml convention.
+#
+# Path filter: tools/ci/affected.py (tools/changed-modules.sh) maps the
+# PR/push diff onto directories that contain MODULE.bazel. A change under
+# forge/ does not test wave/.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ledger:
+    name: ledger check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check LEDGER.md vs on-disk modules
+        run: bash tools/ledger-check.sh
+
+  detect:
+    name: detect affected modules
+    runs-on: ubuntu-latest
+    outputs:
+      any: ${{ steps.detect.outputs.any }}
+      matrix: ${{ steps.detect.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: resolve PR base
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags origin "${{ github.base_ref }}"
+          echo "AFFECTED_BASE=$(git merge-base HEAD origin/${{ github.base_ref }})" >> "$GITHUB_ENV"
+      - name: detect
+        id: detect
+        env:
+          AFFECTED_HEAD: ${{ github.sha }}
+          AFFECTED_BASE: ${{ env.AFFECTED_BASE || github.event.before }}
+        run: bash tools/changed-modules.sh
+
+  module:
+    name: ${{ matrix.module }} (${{ matrix.os }})
+    needs: detect
+    if: needs.detect.outputs.any == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bazel-contrib/setup-bazel@0.10.0
+        if: matrix.bazel != ''
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-${{ matrix.os }}-${{ matrix.module }}
+          repository-cache: true
+      - uses: dtolnay/rust-toolchain@stable
+        if: contains(matrix.extra_cmd, 'cargo')
+      - uses: actions/setup-go@v5
+        # Do not use contains(extra_cmd, 'go test'): that is a substring of
+        # 'cargo test' ('car' + 'go test').
+        if: matrix.setup_go == 'true'
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: protoc (source codegen-drift, e.g. service-finder)
+        if: matrix.setup_protoc == 'true'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: extra (source-repo ci.yml extras, e.g. service-finder codegen)
+        if: matrix.extra_cmd != ''
+        working-directory: ${{ matrix.module }}/${{ matrix.extra_workdir }}
+        run: ${{ matrix.extra_cmd }}
+      - name: bazel ${{ matrix.bazel }}
+        if: matrix.bazel != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          rc=(--bazelrc="${GITHUB_WORKSPACE}/tools/ci/vehicle.bazelrc")
+          if [ "${{ matrix.noworkspace_rc }}" = "true" ]; then
+            rc+=(--noworkspace_rc)
+          fi
+          cmd="${{ matrix.bazel }}"
+          if [ -z "$cmd" ]; then
+            echo "::notice::${{ matrix.module }}: no bazel command (source ci.yml is extra-only)"
+            exit 0
+          fi
+          run_bazel() { bazel "${rc[@]}" "$@"; }
+          set +e
+          # shellcheck disable=SC2086
+          run_bazel $cmd
+          code=$?
+          set -e
+          if [ "$code" -eq 4 ]; then
+            echo "::warning::${{ matrix.module }}: no test targets — bazel build //..."
+            run_bazel build //...
+          elif [ "$code" -ne 0 ]; then
+            exit "$code"
+          fi
+      - name: buildifier lint
+        if: runner.os == 'Linux'
+        working-directory: ${{ matrix.module }}
+        run: |
+          # Shared retry: GitHub release fetches flake with curl 35 (TLS reset).
+          bash "${GITHUB_WORKSPACE}/tools/ci/curl_retry.sh" /tmp/buildifier \
+            https://github.com/bazelbuild/buildtools/releases/download/v7.3.1/buildifier-linux-amd64
+          chmod +x /tmp/buildifier
+          # Imported trees were not format-clean (source CI already red).
+          # Do not rewrite them in this vehicle PR; report, do not fail.
+          if ! /tmp/buildifier --mode=check --lint=warn -r .; then
+            echo "::warning::${{ matrix.module }}: buildifier issues on imported HEAD (not rewritten)"
+          fi
