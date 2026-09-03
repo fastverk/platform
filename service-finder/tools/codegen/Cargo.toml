@@ -1,0 +1,14 @@
+# codegen — regenerates the client's CHECKED-IN stubs from the canonical proto.
+# The client ships generated code (no build.rs) so it builds with zero consumer
+# wiring; this tool + the codegen-drift CI job keep that copy honest.
+[package]
+name = "codegen"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+tonic-build = "0.12"

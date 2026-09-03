@@ -1,0 +1,124 @@
+// fastverk.finder.v1 — semantic / capability-based service discovery.
+//
+// The finder answers ONE question a dozen fastverk components each answer today
+// with their own hand-rolled loop: "which backend serves capability C for
+// selector S?". Instead of every consumer listing k8s Services/CRs by a label,
+// reading `.status.endpoint`, and synthesizing `svc.cluster.local` DNS, they call
+// `Resolve(capability, selector) -> [endpoints]` (or `Watch` for a live stream)
+// and stay k8s-agnostic — no kube client, no RBAC, testable off-cluster.
+//
+// Registration is by convention on the backing k8s Service (the finder is CRD-
+// agnostic — it never re-declares any CRD schema):
+//   * label       finder.fastverk.dev/capability=<capability>   (List filter)
+//   * annotation  finder.fastverk.dev/selectors='<json object>' (advertised attrs)
+//                   e.g. {"ext":[".rs",".rlib"],"language":"rust"}
+//                   a value may be a string or an array of strings.
+//   * annotation  finder.fastverk.dev/endpoint='<url>'          (optional override;
+//                   for external / non-Service targets — else endpoints are
+//                   derived from the Service's named ports as cluster DNS)
+//
+// Match rule: a Service matches a Resolve `selector` when, for EVERY key in the
+// query, the Service advertises that key and the query value is among the
+// Service's advertised value(s). An empty selector matches all Services carrying
+// the capability. This is the exact generalization of botnoc's discovery.rs
+// (plugin-id -> Service) — that becomes capability="console-plugin" with no
+// selector; ast parsers become capability="ast-parser", selector={"ext":...}.
+
+syntax = "proto3";
+
+package fastverk.finder.v1;
+
+// A resolved backend endpoint.
+message Endpoint {
+  // Dial URL, e.g. "http://plugin-forge.fastverk.svc.cluster.local:8080".
+  // gRPC endpoints use the same http:// (h2c) form botnoc's gateway already dials.
+  string url = 1;
+  // The named Service port this endpoint corresponds to ("http", "grpc", …).
+  // Empty when the endpoint came from a finder.fastverk.dev/endpoint override.
+  string port_name = 2;
+  // The selector attributes this backend advertises (the parsed selectors
+  // annotation, flattened to first-value-wins for scalars; arrays join with ",").
+  // Lets a consumer that resolved multiple backends tell them apart.
+  map<string, string> attributes = 3;
+  // The backing Service's name / namespace (for logging + debuggability).
+  string service = 4;
+  string namespace = 5;
+}
+
+message ResolveRequest {
+  // Required. The capability to resolve, e.g. "ast-parser", "console-plugin",
+  // "graphd", "rbe". Matched against the finder.fastverk.dev/capability label.
+  string capability = 1;
+  // Optional attribute filter, e.g. {"ext": ".rs"} or {"repo": "fastverk/botnoc"}.
+  // Empty = every backend carrying the capability.
+  map<string, string> selector = 2;
+  // Optional. Restrict returned endpoints to this named port ("grpc"/"http").
+  string port_name = 3;
+}
+
+message ResolveResponse {
+  // All matching endpoints. Empty (not an error) when nothing is registered —
+  // the caller falls back to its own default (env addr, in-process path, …),
+  // exactly as the hand-rolled finders do today.
+  repeated Endpoint endpoints = 1;
+}
+
+message WatchRequest {
+  string capability = 1;
+  map<string, string> selector = 2;
+  string port_name = 3;
+}
+
+// A Watch pushes the CURRENT full matching endpoint set on every change, so a
+// consumer just replaces its cached snapshot — no per-event bookkeeping. The
+// first message after subscribe is the initial snapshot.
+message WatchEvent {
+  enum Type {
+    TYPE_UNSPECIFIED = 0;
+    // Initial full set delivered right after subscribe.
+    SNAPSHOT = 1;
+    // The matching set changed (backend added/removed/updated); `endpoints` is
+    // the new full set.
+    CHANGED = 2;
+  }
+  Type type = 1;
+  repeated Endpoint endpoints = 2;
+}
+
+// ── EndpointGroups: a named, declarative match + ordering policy ─────────────
+// An EndpointGroup CR (finder.fastverk.dev/v1) names a (capability, selector,
+// ordering) tuple so consumers reference a stable name instead of encoding match
+// criteria + ordering in code — the platform can retune without redeploying them.
+// The group holds POLICY only; the finder resolves it LIVE against the same
+// Service cache (nothing is materialized). Ordering ("Priority") gives
+// primary→fallback / canary that the flat Resolve cannot express.
+message ResolveGroupRequest {
+  // The EndpointGroup name.
+  string name = 1;
+}
+message ResolveGroupResponse {
+  // Endpoints in the group's policy order.
+  repeated Endpoint endpoints = 1;
+}
+message WatchGroupRequest {
+  string name = 1;
+}
+
+service Finder {
+  // One-shot resolve. Backed by a live cache of labeled Services (informer), so
+  // this is a local lookup — off the network hot path.
+  rpc Resolve(ResolveRequest) returns (ResolveResponse);
+
+  // Live stream: an initial SNAPSHOT then a CHANGED event whenever the matching
+  // endpoint set changes. Replaces the boot-once/no-Watch limitation of the
+  // in-process finders (e.g. discovery.rs polls only at startup).
+  rpc Watch(WatchRequest) returns (stream WatchEvent);
+
+  // Resolve a named EndpointGroup (ordered per its policy). NotFound if no such
+  // group. Empty endpoints (not an error) when the group matches nothing.
+  rpc ResolveGroup(ResolveGroupRequest) returns (ResolveGroupResponse);
+
+  // Live stream of a named group: SNAPSHOT then CHANGED when either the matching
+  // Services OR the group's own policy change.
+  rpc WatchGroup(WatchGroupRequest) returns (stream WatchEvent);
+}

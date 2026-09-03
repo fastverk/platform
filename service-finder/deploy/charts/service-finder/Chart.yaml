@@ -1,0 +1,13 @@
+apiVersion: v2
+name: service-finder
+description: >-
+  service-finder — the fastverk capability-based service-discovery daemon serving
+  fastverk.finder.v1.Finder. Answers Resolve(capability, selector) -> [endpoints]
+  (+ Watch) from a live cache of k8s Services labeled finder.fastverk.dev/capability,
+  so consumers (klad code-search parser routing, botnoc's gateway/shell, the
+  controlplane RBE resolver, modgraph precompute) discover backends by attribute
+  WITHOUT a kube client of their own. ClusterIP — reached over Service DNS. Needs
+  only list/watch on Services.
+type: application
+version: 0.1.0
+appVersion: "latest"

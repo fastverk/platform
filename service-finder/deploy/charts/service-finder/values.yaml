@@ -1,0 +1,46 @@
+# ≥2: the finder is on the console's critical path — botnoc-web and plugin-chat
+# resolve their plugin fleet from it AT BOOT, so if it is unavailable when they
+# start they fall back to env and come up degraded (missing plugins) until
+# restarted. It is stateless (a Service cache rebuilt from the API server), so
+# extra replicas are cheap. Longer term, consumers should hold a Watch (the client
+# lib's `Watched`) so a finder blip self-heals instead of persisting until restart.
+replicaCount: 2
+
+# Published publicly to GHCR by .github/workflows/publish.yml, so ANY project
+# (fastverk, aion, another cluster) can pull with no registry auth. Override
+# `image.repository` to mirror into a private registry (e.g. ECR) if preferred.
+image:
+  repository: ghcr.io/fastverk/service-finder
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# gRPC bind port (fastverk.finder.v1.Finder). Clients dial
+# http://service-finder.<ns>.svc.cluster.local:<grpcPort>.
+grpcPort: 50060
+
+logLevel: "service_finder=info,info"
+
+# Namespace the finder discovers Services in. Empty ⇒ the pod's own namespace
+# (via the downward API). Set to a fixed namespace for cross-namespace discovery
+# (then widen the RBAC below to a ClusterRole).
+discoveryNamespace: ""
+
+serviceAccount:
+  create: true
+  name: ""
+
+# The finder's only privilege: read Services (its backing store) in its namespace.
+rbac:
+  create: true
+
+# ClusterIP: consumers reach it over Service DNS.
+service:
+  type: ClusterIP
+  annotations: {}
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
