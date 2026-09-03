@@ -21,9 +21,6 @@ ROW = re.compile(
     re.M,
 )
 
-PLACEHOLDER = {"", "—", "-", "n/a", "unknown"}
-
-
 def parse_module_bazel(text: str) -> tuple[str | None, str | None]:
     name = version = None
     in_call = False
@@ -90,10 +87,6 @@ def parse_ledger() -> list[dict]:
         row["sha"] = cols[3].strip().strip("`")
         rows.append(row)
     return rows
-
-
-def _is_placeholder(value: str | None) -> bool:
-    return (value or "").strip() in PLACEHOLDER
 
 
 def main() -> int:
