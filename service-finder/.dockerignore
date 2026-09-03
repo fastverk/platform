@@ -1,0 +1,7 @@
+target/
+bazel-*
+.bazelrc.user
+.git/
+.claude/
+MODULE.bazel.lock
+**/*.md

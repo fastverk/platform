@@ -1,0 +1,142 @@
+# Default values for the wave chart.
+
+image:
+  # The wave CLI image the run Jobs execute. ECR: this chart only ever deploys
+  # on the fastverk build plane. On a CI-built per-sha chart, `tbzl build --name`
+  # bakes this repository + `--tag` bakes image.tag=<sha>, so a write-back
+  # targetRevision bump auto-rolls it (the plugin-integrations model).
+  repository: 042825952740.dkr.ecr.us-east-1.amazonaws.com/wave
+  # Defaults to the chart's appVersion when empty; baked to <sha> by CI.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Cron schedule for the wave tick (UTC). Discovery runs on this cadence;
+# reconcile (if enabled) runs on its own schedule below.
+schedule: "0 6 * * *"
+
+# Never overlap runs — the reconcile job is the single WaveStore writer.
+concurrencyPolicy: Forbid
+successfulJobsHistoryLimit: 3
+failedJobsHistoryLimit: 3
+# Per-job retry/cleanup.
+backoffLimit: 0
+restartPolicy: Never
+ttlSecondsAfterFinished: 86400
+
+forge:
+  # gitlab | github
+  kind: gitlab
+  # Instance host (empty = the forge default, e.g. gitlab.com / github.com).
+  host: gitlab.savvifi.com
+
+# The forge API token — a bot group-access token with `api` scope (open MRs
+# across the groups below). Provide via an existing Secret; its value is
+# exported to the container as FORGE_TOKEN (wave's universal token env).
+token:
+  # The fleet's per-group GitLab bot tokens (fastverk-agent-<group>, api scope),
+  # the same secret plugin-forge consumes. Key `aion` = group_195_bot_… with
+  # Owner on aion/* — so wave MRs are authored by the group bot, not a person,
+  # and rotation is decoupled from any individual. NOT wave-forge-token, which is
+  # read_api only and cannot open MRs.
+  #
+  # This wires ONE group. A WaveCascade over a different group (studio/infra)
+  # needs that group's key — resolving the key from spec.scope.group is the
+  # follow-up; today the operator injects whichever key is set here as FORGE_TOKEN.
+  existingSecret: forge-gitlab-group-tokens
+  secretKey: aion
+
+# Discovery: one CronJob per group scans for out-of-date external deps.
+discover:
+  enabled: true
+  # Groups/orgs to scan (one CronJob each).
+  groups:
+    - aion
+    - studio
+    - infra
+  # Module-name prefixes owned by the internal cascade — skipped by discovery.
+  internalPrefixes:
+    - "@aion/"
+    - "@savvi-studio/"
+  # false = report-only (Phase 1). Set true once `wave discover --open` ships
+  # (Phase 2); --open writes to the WaveStore, so it also mounts the PVC and
+  # should be serialized with reconcile (see NOTES).
+  open: false
+
+# Reconcile: drive in-flight cascades to completion. The single WaveStore
+# writer; mounts the persistent volume.
+reconcile:
+  enabled: true
+  schedule: "*/15 * * * *"
+
+# WaveStore persistence ($FASTVERK_STATE_DIR) — survives across runs.
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  # Mount path; exported as FASTVERK_STATE_DIR.
+  stateDir: /var/lib/wave
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# RUST_LOG for the wave binary.
+logLevel: info
+
+# ── operator ────────────────────────────────────────────────────────────
+# The wave-operator reconciles WaveCascade CRs (shipped in crds/) into run Jobs.
+# A WaveCascade is a NAMED, repeatable bump config — which repos, which modules
+# are first-party, report-or-open — driven on demand (annotate with
+# fastverk.savvifi.com/wave-now) and/or periodically (spec.schedule).
+#
+# It supersedes the untyped discover/reconcile CronJobs above for anything
+# CR-driven: it renders the SAME `wave discover …` argv, but adds a name, a
+# trigger, and a status. The CronJobs stay for the org-wide external scan, so the
+# two coexist while that migrates.
+#
+# Inert until a WaveCascade exists — enabling this reconciles nothing on its own.
+operator:
+  enabled: false
+  image:
+    # Go operator — a DIFFERENT image + ECR repo from the Rust wave CLI above
+    # (which it renders into run Jobs via WAVE_IMAGE). The build-runner derives
+    # this repo from the oci_push target NAME (`wave-operator-image_push` →
+    # `wave-operator`), so both images ride ONE BuildRun of the wave repo.
+    repository: 042825952740.dkr.ecr.us-east-1.amazonaws.com/wave-operator
+    # Empty ⇒ share the CLI image.tag (below): both images are built from the
+    # SAME wave repo sha, and CI bakes only the top-level image.tag=<sha>. So a
+    # per-sha chart tags the operator image correctly without a second bake.
+    tag: ""
+    pullPolicy: IfNotPresent
+  serviceAccount:
+    annotations: {}
+  # PVC for the durable WaveStore, mounted into run Jobs. Empty ⇒ runs are
+  # stateless, which is correct for the flat bump path (it keeps no cross-run
+  # state) but not for a cascade. ReadWriteOnce/single-writer, which is why the
+  # operator enforces single-flight.
+  stateClaim: ""
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 256Mi

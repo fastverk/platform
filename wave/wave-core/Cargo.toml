@@ -1,0 +1,42 @@
+[package]
+name = "wave-core"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.95.0"
+license = "MIT"
+repository = "https://github.com/fastverk/wave"
+description = "Cross-repo dependency-cascade engine: graph, providers, reconcile state machine, tracing."
+
+[lib]
+name = "wave_core"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+# raw_value: RawValue hands back a section's VERBATIM source text, which is how
+# the npm provider scopes a bump to the dependency sections without hand-rolling
+# a JSON scanner (see NpmProvider::section_span).
+serde_json = { version = "1.0", features = ["raw_value"] }
+toml = "0.8"
+semver = "1"
+regex = "1"
+tracing = "0.1"
+tokio = { version = "1.40", features = ["full"] }
+futures = "0.3"
+prost = "0.13"
+chrono = { version = "0.4", features = ["serde"] }
+# Sibling forge module. Bazel resolves it as @forge//:forge (a module dep, NOT
+# the crate_universe); this path dep is for cargo/IDE iteration against a
+# checked-out sibling. External cargo builds use the published forge tag.
+fastverk-forge = { path = "../../forge" }
+
+[build-dependencies]
+prost-build = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"

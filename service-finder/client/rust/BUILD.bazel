@@ -1,0 +1,54 @@
+"""service-finder-client — the reusable Finder client.
+
+This package existed as a Cargo crate and as a *reference* from three places —
+`MODULE.bazel`'s `crate.from_cargo(manifests = [..., "//client/rust:Cargo.toml"])`,
+the root `BUILD.bazel` docstring ("the client lib lives at
+`//client/rust:service-finder-client`"), and the module docstring — but it had no
+BUILD file, so it was never a Bazel package at all. Every Bazel invocation in the
+repo died during module resolution:
+
+    Error in watch: Unable to load package for //client/rust:Cargo.toml:
+    BUILD file not found in any of the following directories.
+
+`exports_files(["Cargo.toml"])` is the part that actually clears that error:
+crate_universe resolves the manifest by LABEL, and a label needs a package.
+
+No `cargo_build_script` here, deliberately. The generated `fastverk.finder.v1`
+code is checked in under `src/generated/` precisely so this crate builds with
+zero consumer wiring — no protoc, no .proto, no crate_universe annotation — as
+`src/lib.rs` explains. Adding a build script would re-break the consumers that
+choice was made for.
+"""
+
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# Required by MODULE.bazel's crate.from_cargo(manifests = ...).
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "service-finder-client",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "service_finder_client",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    # package_name pins these to THIS manifest rather than the root crate's —
+    # the two have different dependency sets, and the client's is deliberately
+    # the smaller one.
+    proc_macro_deps = all_crate_deps(
+        package_name = "client/rust",
+        proc_macro = True,
+    ),
+    deps = all_crate_deps(
+        package_name = "client/rust",
+        normal = True,
+    ),
+)
+
+rust_test(
+    name = "service_finder_client_test",
+    crate = ":service-finder-client",
+    edition = "2021",
+)

@@ -1,0 +1,36 @@
+# Guard the client's CHECKED-IN generated code.
+#
+# client/rust ships generated stubs (src/generated) instead of running a build.rs,
+# so it builds with ZERO consumer wiring: no protoc, no .proto, no crate_universe
+# annotation. That is required because a consumer's Bazel build vendors only the
+# crate's package directory (not this repo's proto/) and auto-generates a BUILD
+# with no protoc — a build.rs there is unbuildable.
+#
+# The tradeoff is drift, so: regenerate from the canonical proto and fail if the
+# checked-in copy is stale. Fix with `cargo run -p codegen`.
+name: codegen-drift
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  drift:
+    name: client stubs match the proto
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: regenerate
+        run: cargo run -q -p codegen
+      - name: fail if the checked-in stubs are stale
+        run: |
+          if ! git diff --quiet -- client/rust/src/generated; then
+            echo "::error::client/rust/src/generated is stale — run 'cargo run -p codegen' and commit."
+            git diff -- client/rust/src/generated
+            exit 1
+          fi
+          echo "client stubs are current ✓"

@@ -1,0 +1,15 @@
+# Public registry chain applied by vehicle CI when invoking Bazel in a
+# module subdirectory. Each imported tree already carries this in its own
+# .bazelrc; this file is the vehicle-level copy so a missing workspace rc
+# still resolves from registry.tbzl.dev / registry.fastverk.com + BCR.
+#
+# Credential helper is omitted on purpose. Module .bazelrc files do not
+# point at a vehicle-root cred-helper binary.
+
+common --enable_bzlmod
+common --experimental_isolated_extension_usages
+common --registry=https://registry.tbzl.dev/
+common --registry=https://registry.fastverk.com/
+common --registry=https://bcr.bazel.build/
+test --test_output=errors
+test --test_summary=terse

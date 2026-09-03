@@ -1,0 +1,70 @@
+"""service-finder — capability-based service discovery daemon + library.
+
+The proto is compiled by build.rs (tonic-build) under a cargo_build_script;
+protoc comes from @protobuf. `@service_finder//:service_finder` is the rust_library
+(resolver/registry/service); `//:service-finder-server` is the daemon; the client
+lib lives at `//client/rust:service-finder-client`.
+"""
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("@crates//:defs.bzl", "all_crate_deps")
+load("//tools/oci:defs.bzl", "rust_service_image")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "MODULE.bazel",
+    "Cargo.lock",
+])
+
+cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs"],
+    build_script_env = {
+        "PROTOC": "$(execpath @protobuf//:protoc)",
+    },
+    data = ["//proto/fastverk/finder/v1:finder.proto"],
+    edition = "2021",
+    tools = ["@protobuf//:protoc"],
+    deps = all_crate_deps(build = True),
+)
+
+rust_library(
+    name = "service_finder",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/main.rs"],
+    ),
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = [":build_script"] + all_crate_deps(normal = True),
+)
+
+# The finder daemon: serves fastverk.finder.v1.Finder over the Registry (a live
+# cache of capability-labeled Services). Needs only list/watch on Services.
+rust_binary(
+    name = "service-finder-server",
+    srcs = ["src/main.rs"],
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = [":service_finder"] + all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "service_finder_test",
+    crate = ":service_finder",
+    edition = "2021",
+)
+
+# The service-finder OCI image (distroless/cc + the binary). The published image
+# is built by .github/workflows/publish.yml (Dockerfile → ghcr.io/fastverk/
+# service-finder); this target is the Bazel-native path (RBE) for parity with the
+# sibling repos.
+rust_service_image(
+    name = "service-finder-image",
+    binary = ":service-finder-server",
+    exposed_ports = ["50060/tcp"],
+    repository = "ghcr.io/fastverk/service-finder",
+)

@@ -1,0 +1,5 @@
+# The finder proto is compiled by build.rs (tonic-build), not a Bazel
+# proto_library — exported so the cargo_build_script can take it as data.
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["finder.proto"])

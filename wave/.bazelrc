@@ -1,0 +1,34 @@
+common --enable_bzlmod
+common --experimental_isolated_extension_usages
+
+common --registry=https://registry.tbzl.dev/
+common --registry=https://bcr.bazel.build/
+
+common --action_env=HOME
+
+# ─── zig C/C++ toolchain: the upb link fix ─────────────────────────
+# The zig toolchains registered in MODULE.bazel are non-libc-aware and match the
+# EXEC platform on linux, so zig links protobuf's upb HOST tools — which fails
+# with `undefined reference … upb_ExtensionRegistry_AddAllLinkedExtensions`
+# (lld GCs the linker-array section) UNLESS --no-gc-sections is set. This is the
+# proven plugin-fleet pattern (plugin-forge/tbzl/integrations, all green on RBE).
+# platform-specific so it only applies where zig is actually the toolchain.
+common --enable_platform_specific_config
+build:linux --host_linkopt=-Wl,--no-gc-sections
+build:linux --linkopt=-Wl,--no-gc-sections
+build:linux --sandbox_add_mount_pair=/tmp
+build:macos --sandbox_add_mount_pair=/var/tmp
+
+test --test_output=errors
+test --test_summary=terse
+
+try-import %workspace%/user.bazelrc
+
+# ─── Go operator image ────────────────────────────────────────────
+# //operator/cmd:wave-operator-image targets linux/amd64 (EKS) and its
+# distroless-static base is amd64-only, so the IMAGE rule must build under a
+# linux/amd64 platform regardless of host. The Go library/binary build fine on
+# the host without this — only the image rule needs it:
+#   bazel build //operator/cmd:wave-operator-image --config=operator-image
+#   bazel run   //operator/cmd:wave-operator-image_push --config=operator-image -- --tag=$SHA
+build:operator-image --platforms=@rules_go//go/toolchain:linux_amd64

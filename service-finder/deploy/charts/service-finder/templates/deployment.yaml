@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "service-finder.fullname" . }}
+  labels:
+    {{- include "service-finder.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "service-finder.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "service-finder.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "service-finder.serviceAccountName" . }}
+      containers:
+        - name: service-finder
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.grpcPort }}
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.logLevel | quote }}
+            - name: FINDER_ADDR
+              value: {{ printf "0.0.0.0:%v" .Values.grpcPort | quote }}
+            # The namespace the finder watches Services in.
+            - name: POD_NAMESPACE
+              {{- if .Values.discoveryNamespace }}
+              value: {{ .Values.discoveryNamespace | quote }}
+              {{- else }}
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+              {{- end }}
+          # gRPC health probe (tonic-health reports the Finder service SERVING).
+          readinessProbe:
+            grpc: { port: {{ .Values.grpcPort }} }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            grpc: { port: {{ .Values.grpcPort }} }
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}

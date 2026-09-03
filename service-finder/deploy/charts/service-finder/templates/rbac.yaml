@@ -1,0 +1,35 @@
+{{- if .Values.rbac.create }}
+# The finder's entire privilege surface: read Services (its backing store) in its
+# namespace. It never reads Secrets, Pods, or any CRD — a Service's capability
+# label + selectors annotation + named ports are all it needs. Namespaced Role;
+# widen to a ClusterRole if discoveryNamespace spans namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "service-finder.fullname" . }}
+  labels:
+    {{- include "service-finder.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+  # EndpointGroup policy CRs (the named match + ordering layer).
+  - apiGroups: ["finder.fastverk.dev"]
+    resources: ["endpointgroups"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "service-finder.fullname" . }}
+  labels:
+    {{- include "service-finder.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "service-finder.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "service-finder.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
