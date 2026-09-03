@@ -1,0 +1,28 @@
+# Report-only source-drift audit. Git repo ≠ Bazel module: this does not
+# test, rewrite, or bump any imported tree. It only compares LEDGER.md
+# SHAs to each source repo's default-branch HEAD.
+#
+# Not on pull_request or push — it must not gate PRs or duplicate ci.yml.
+
+name: drift
+
+on:
+  schedule:
+    # Off-peak UTC, staggered off tomato-bazel/rules (04:17) so the vehicles
+    # do not all audit in the same minute.
+    - cron: "37 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: source drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check imported SHAs against source default branches
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 tools/ci/check_drift.py
