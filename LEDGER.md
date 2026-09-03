@@ -134,3 +134,18 @@ not rewritten. After the add, confirm `<dir>/MODULE.bazel` still declares
 the same `name` and `version` as the source default branch (do not reset
 versions to a vehicle-wide number). Directory names match the GitHub repo
 (`service-finder`); Bazel `module(name)` may differ (`service_finder`).
+
+## Drift audit
+
+[`drift.yml`](.github/workflows/drift.yml) runs daily (report-only, off the
+PR path; `workflow_dispatch` available) and compares each imported row's
+Source SHA to the source repo's default-branch HEAD. A drifted row is
+fixed with a merge-commit subtree pull, then by updating that row's
+Source SHA:
+
+```sh
+git subtree pull --prefix=<dir> https://github.com/fastverk/<dir>.git main
+```
+
+No `--squash` — squashing destroys the merge base for future subtree
+pulls. Private/unreachable sources (e.g. `geetch`) are warnings only.
