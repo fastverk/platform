@@ -1,0 +1,119 @@
+"""forge — generic forge contract (ForgeService) + GitHub/GitLab adapters.
+
+Single crate at the repo root. The proto is compiled by build.rs (tonic-build)
+under a cargo_build_script; protoc comes from @protobuf. `@forge//:forge` is the
+rust_library other fastverk modules (e.g. wave) depend on."""
+
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("//tools/oci:defs.bzl", "rust_service_image")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["MODULE.bazel"])
+
+cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs"],
+    build_script_env = {
+        "PROTOC": "$(execpath @protobuf//:protoc)",
+    },
+    data = [
+        "//proto/forge/v1:forge.proto",
+        "//proto/forge/v1:provision.proto",
+        # events.proto imports discovery.proto, so both must be staged for protoc
+        # even though only events is named in a service definition here.
+        "//proto/forge/v1:discovery.proto",
+        "//proto/forge/v1:events.proto",
+    ],
+    edition = "2021",
+    tools = ["@protobuf//:protoc"],
+    deps = all_crate_deps(build = True),
+)
+
+rust_library(
+    name = "forge",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/bin/**"],
+    ),
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = [":build_script"] + all_crate_deps(normal = True),
+)
+
+# The forge-gateway daemon: serves forge.v1.ForgeService over the Forge trait
+# (GitLab/GitHub adapters), per-request identity from gRPC metadata. Consumed by
+# the wave cascade engine and the console's agent-callable MCP write tools.
+rust_binary(
+    name = "forge-gateway",
+    srcs = ["src/bin/forge-gateway.rs"],
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = [":forge"] + all_crate_deps(normal = True),
+)
+
+# The forge-gateway OCI image (distroless/cc + the binary). Built on RBE; the
+# build-runner pushes //:forge-gateway-image_push to $ECR/forge-gateway:<sha>.
+rust_service_image(
+    name = "forge-gateway-image",
+    binary = ":forge-gateway",
+    exposed_ports = ["50055/tcp"],
+    repository = "042825952740.dkr.ecr.us-east-1.amazonaws.com/forge-gateway",
+)
+
+rust_test(
+    name = "forge_test",
+    crate = ":forge",
+    edition = "2021",
+)
+
+# The same crate with the `testing` feature on, exposing forge::testing::FakeForge.
+# A SEPARATE target rather than a feature on :forge so consumers who only want the
+# contract (wave is a standalone public CLI) don't compile the double — while
+# out-of-crate Bazel modules (plugin-forge, geetch) can still depend on it, which
+# a #[cfg(test)] module could never provide.
+rust_library(
+    name = "forge_testing",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/bin/**"],
+    ),
+    crate_features = ["testing"],
+    crate_name = "forge",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = [":build_script"] + all_crate_deps(normal = True),
+)
+
+# The contract conformance suite — the executable specification. An adapter is
+# correct when this passes; new contract semantics get a case HERE first, never
+# in an adapter-local test. geetch's B2 acceptance is adding one fixture to it.
+rust_test(
+    name = "conformance",
+    srcs = ["tests/conformance.rs"],
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = [":forge_testing"] + all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+# B8: the same shared suite, driven through the `geetch` adapter over a REAL
+# socket, against a FakeForge-backed server. Proves the passthrough's wire
+# fidelity here; geetch runs the identical suite through this adapter against a
+# running geetchd (it can build one — this module cannot, that would be circular).
+rust_test(
+    name = "geetch_adapter",
+    srcs = ["tests/geetch_adapter.rs"],
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = [":forge_testing"] + all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)

@@ -1,0 +1,59 @@
+# Standalone crate (built by Bazel; this table keeps a bare `cargo` invocation
+# from being captured by an ancestor workspace — same as the sibling fvkit/wave
+# repos).
+[workspace]
+
+[package]
+name = "fastverk-forge"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.95.0"
+license = "MIT"
+repository = "https://github.com/fastverk/forge"
+description = "Generic forge contract (ForgeService) + GitHub/GitLab adapters."
+
+[lib]
+name = "forge"
+path = "src/lib.rs"
+
+[dependencies]
+tonic = "0.12"
+prost = "0.13"
+tokio = { version = "1.40", features = ["full"] }
+anyhow = "1.0"
+thiserror = "1.0"
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+octocrab = "0.41"
+http = "1"
+base64 = "0.22"
+urlencoding = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = []
+# Exposes `forge::testing::FakeForge` — the in-memory contract double. Non-default
+# so consumers (wave is a standalone public CLI) don't carry it, but a REAL
+# feature rather than `#[cfg(test)]` so out-of-crate Bazel modules can use it.
+testing = []
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[dev-dependencies]
+# The conformance suite drives the async trait directly.
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
+# The geetch adapter's suite serves a FakeForge over a real socket. Serving from
+# an already-bound listener (rather than bind→drop→`serve(addr)`) removes the
+# window where two of the eight concurrent cases could race onto one reclaimed
+# port. Already in the tree via tonic; this only makes the edge direct.
+tokio-stream = { version = "0.1", features = ["net"] }
+
+[lints.rust]
+unsafe_code = "forbid"

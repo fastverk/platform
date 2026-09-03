@@ -1,0 +1,419 @@
+//! forge-gateway — the gRPC daemon serving `forge.v1.ForgeService`.
+//!
+//! The single-source-of-truth server for forge operations: it implements the
+//! generated `ForgeService` over the crate's [`Forge`] trait, dispatching each
+//! RPC to a per-request [`GitLabForge`]/[`GitHubForge`] adapter. The daemon holds
+//! **no** forge credential of its own — the caller's identity travels in request
+//! metadata (`x-fastverk-gitlab-token` / `-host`, `x-fastverk-github-token`),
+//! exactly like the plugin HTTP facade forwards `X-Fastverk-*` headers — so every
+//! op runs as the caller.
+//!
+//! Both consumers share this one implementation: the `wave` cascade engine (which
+//! today uses the [`Forge`] trait in-process) can dial it over gRPC, and the
+//! console's agent-callable MCP write tools proxy to it, so GitLab MR
+//! create/auto-merge/merge live in one place.
+
+use tonic::metadata::MetadataMap;
+use tonic::{Request, Response, Status};
+
+use crate::github::GitHubForge;
+use crate::gitlab::GitLabForge;
+use crate::pb::forge_service_server::{ForgeService, ForgeServiceServer};
+use crate::pb::{
+    CommitFileRequest, CommitFileResponse, CreateBranchRequest, CreateBranchResponse,
+    EnableAutoMergeRequest, EnableAutoMergeResponse, EnsureTriggerRequest, EnsureTriggerResponse,
+    ForgeCommentRequest, ForgeSetCheckRequest, ForgeSetDeploymentRequest, GetCapabilitiesRequest,
+    GetCapabilitiesResponse, GetChangeStateRequest, GetChangeStateResponse,
+    GetDefaultBranchRequest, GetDefaultBranchResponse, ListForgeIssuesRequest,
+    ListForgePullRequestsRequest, ListForgeReposRequest, ListIssuesResponse,
+    ListPullRequestsResponse, ListReposResponse, ListTriggersRequest, ListTriggersResponse,
+    MergeRequest, MergeResponse, OpenChangeRequest, OpenChangeResponse, PipelineStatusRequest,
+    PipelineStatusResponse, ReadFileRequest, ReadFileResponse, WriteAck,
+};
+use crate::{Forge, ForgeError, ForgeKind, RepoRef};
+
+/// Metadata key carrying the caller's self-hosted GitLab token.
+const GITLAB_TOKEN_META: &str = "x-fastverk-gitlab-token";
+/// Metadata key carrying the caller's GitLab instance host (self-hosted, so the
+/// host travels with the token). Falls back to `RepoRef.host` when absent.
+const GITLAB_HOST_META: &str = "x-fastverk-gitlab-host";
+/// Metadata key carrying the caller's GitHub token.
+const GITHUB_TOKEN_META: &str = "x-fastverk-github-token";
+
+/// The `forge.v1.ForgeService` implementation.
+#[derive(Default)]
+pub struct ForgeGateway {}
+
+impl ForgeGateway {
+    /// Wrap the gateway in its tonic server, ready to `add_service`.
+    pub fn into_server(self) -> ForgeServiceServer<Self> {
+        ForgeServiceServer::new(self)
+    }
+
+    /// Build the per-request forge adapter for `repo` from the caller's metadata
+    /// credentials. GitLab uses `RepoRef.host` (else the metadata host); GitHub
+    /// needs only the token.
+    fn adapter(&self, repo: &RepoRef, meta: &MetadataMap) -> Result<Box<dyn Forge>, Status> {
+        match ForgeKind::try_from(repo.forge).unwrap_or(ForgeKind::Unspecified) {
+            ForgeKind::Gitlab => {
+                let token = meta_str(meta, GITLAB_TOKEN_META)
+                    .ok_or_else(|| Status::unauthenticated("missing gitlab token"))?;
+                let host = if repo.host.is_empty() {
+                    meta_str(meta, GITLAB_HOST_META).unwrap_or_default()
+                } else {
+                    repo.host.clone()
+                };
+                if host.is_empty() {
+                    return Err(Status::invalid_argument(
+                        "gitlab host required (repo.host or metadata)",
+                    ));
+                }
+                Ok(Box::new(GitLabForge::new(host, token).map_err(to_status)?))
+            }
+            ForgeKind::Github => {
+                let token = meta_str(meta, GITHUB_TOKEN_META)
+                    .ok_or_else(|| Status::unauthenticated("missing github token"))?;
+                Ok(Box::new(GitHubForge::new(token).map_err(to_status)?))
+            }
+            // The contract knows about geetch; this gateway does not serve it
+            // yet (the GeetchForge adapter is still to be written). Say exactly
+            // that. Falling through to another adapter would dial the wrong
+            // host with the wrong credential and report a plausible failure.
+            ForgeKind::Geetch => Err(Status::unimplemented(
+                "repo.forge = FORGE_GEETCH: the geetch adapter is not wired into forge-gateway yet",
+            )),
+            ForgeKind::Unspecified => Err(Status::invalid_argument(
+                "repo.forge must be one of FORGE_GITHUB, FORGE_GITLAB, FORGE_GEETCH",
+            )),
+        }
+    }
+}
+
+/// Split a request into its metadata + the required `repo`, and build the adapter.
+/// The common preamble for every RPC below.
+macro_rules! adapter_for {
+    ($self:ident, $req:ident) => {{
+        let (meta, _ext, msg) = $req.into_parts();
+        let repo = msg
+            .repo
+            .clone()
+            .ok_or_else(|| Status::invalid_argument("repo is required"))?;
+        let forge = $self.adapter(&repo, &meta)?;
+        (forge, repo, msg)
+    }};
+}
+
+#[tonic::async_trait]
+impl ForgeService for ForgeGateway {
+    async fn get_default_branch(
+        &self,
+        req: Request<GetDefaultBranchRequest>,
+    ) -> Result<Response<GetDefaultBranchResponse>, Status> {
+        let (forge, repo, _msg) = adapter_for!(self, req);
+        let branch = forge.default_branch(&repo).await.map_err(to_status)?;
+        Ok(Response::new(GetDefaultBranchResponse { branch }))
+    }
+
+    async fn read_file(
+        &self,
+        req: Request<ReadFileRequest>,
+    ) -> Result<Response<ReadFileResponse>, Status> {
+        let (forge, repo, msg) = adapter_for!(self, req);
+        let blob = forge
+            .read_file(&repo, &msg.path, &msg.r#ref)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(ReadFileResponse {
+            found: blob.is_some(),
+            blob,
+        }))
+    }
+
+    async fn create_branch(
+        &self,
+        req: Request<CreateBranchRequest>,
+    ) -> Result<Response<CreateBranchResponse>, Status> {
+        let (forge, repo, msg) = adapter_for!(self, req);
+        let out = forge
+            .create_branch(&repo, &msg.name, &msg.from_sha)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(CreateBranchResponse {
+            created: out.created,
+            already_existed: out.already_existed,
+        }))
+    }
+
+    async fn commit_file(
+        &self,
+        req: Request<CommitFileRequest>,
+    ) -> Result<Response<CommitFileResponse>, Status> {
+        let (forge, repo, msg) = adapter_for!(self, req);
+        let commit_sha = forge
+            .commit_file(
+                &repo,
+                &msg.branch,
+                &msg.path,
+                &msg.content,
+                &msg.blob_sha,
+                &msg.message,
+            )
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(CommitFileResponse { commit_sha }))
+    }
+
+    async fn open_change(
+        &self,
+        req: Request<OpenChangeRequest>,
+    ) -> Result<Response<OpenChangeResponse>, Status> {
+        let (forge, repo, msg) = adapter_for!(self, req);
+        let out = forge
+            .open_change(
+                &repo,
+                &msg.head,
+                &msg.base,
+                &msg.title,
+                &msg.body,
+                msg.remove_source_branch,
+            )
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(OpenChangeResponse {
+            change: Some(out.change),
+            already_existed: out.already_existed,
+        }))
+    }
+
+    async fn enable_auto_merge(
+        &self,
+        req: Request<EnableAutoMergeRequest>,
+    ) -> Result<Response<EnableAutoMergeResponse>, Status> {
+        let (forge, repo, msg) = adapter_for!(self, req);
+        let change = msg
+            .change
+            .ok_or_else(|| Status::invalid_argument("change is required"))?;
+        let enabled = forge
+            .enable_auto_merge(&repo, &change)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(EnableAutoMergeResponse { enabled }))
+    }
+
+    async fn pipeline_status(
+        &self,
+        req: Request<PipelineStatusRequest>,
+    ) -> Result<Response<PipelineStatusResponse>, Status> {
+        let (forge, repo, msg) = adapter_for!(self, req);
+        let change = msg
+            .change
+            .ok_or_else(|| Status::invalid_argument("change is required"))?;
+        let ps = forge
+            .pipeline_status(&repo, &change)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(PipelineStatusResponse {
+            status: ps.status as i32,
+            pipeline_id: ps.pipeline_id,
+            pipeline_url: ps.url,
+        }))
+    }
+
+    async fn merge(&self, req: Request<MergeRequest>) -> Result<Response<MergeResponse>, Status> {
+        let (forge, repo, msg) = adapter_for!(self, req);
+        let change = msg
+            .change
+            .ok_or_else(|| Status::invalid_argument("change is required"))?;
+        let merge_commit_sha = forge.merge(&repo, &change).await.map_err(to_status)?;
+        Ok(Response::new(MergeResponse { merge_commit_sha }))
+    }
+
+    async fn get_change_state(
+        &self,
+        req: Request<GetChangeStateRequest>,
+    ) -> Result<Response<GetChangeStateResponse>, Status> {
+        let (forge, repo, msg) = adapter_for!(self, req);
+        let change = msg
+            .change
+            .ok_or_else(|| Status::invalid_argument("change is required"))?;
+        let state = forge
+            .change_state(&repo, &change)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(GetChangeStateResponse {
+            state: state as i32,
+            // The trait reports state only; the merge sha is available via Merge.
+            merge_commit_sha: String::new(),
+        }))
+    }
+
+    async fn list_triggers(
+        &self,
+        req: Request<ListTriggersRequest>,
+    ) -> Result<Response<ListTriggersResponse>, Status> {
+        let (forge, repo, _msg) = adapter_for!(self, req);
+        let triggers = forge.list_triggers(&repo).await.map_err(to_status)?;
+        Ok(Response::new(ListTriggersResponse { triggers }))
+    }
+
+    async fn ensure_trigger(
+        &self,
+        req: Request<EnsureTriggerRequest>,
+    ) -> Result<Response<EnsureTriggerResponse>, Status> {
+        let (forge, repo, msg) = adapter_for!(self, req);
+        let out = forge
+            .ensure_trigger(&repo, &msg.url, &msg.events, &msg.secret)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(EnsureTriggerResponse {
+            trigger: Some(out.trigger),
+            created: out.created,
+        }))
+    }
+
+    async fn get_capabilities(
+        &self,
+        req: Request<GetCapabilitiesRequest>,
+    ) -> Result<Response<GetCapabilitiesResponse>, Status> {
+        let (forge, _repo, _msg) = adapter_for!(self, req);
+        let capabilities = forge.capabilities().await.map_err(to_status)?;
+        Ok(Response::new(GetCapabilitiesResponse {
+            capabilities: Some(capabilities),
+        }))
+    }
+
+    // ── write-back ────────────────────────────────────────────────────────────
+
+    async fn set_check(
+        &self,
+        req: Request<ForgeSetCheckRequest>,
+    ) -> Result<Response<WriteAck>, Status> {
+        let (forge, repo, msg) = adapter_for!(self, req);
+        let detail = forge
+            .set_check(
+                &repo,
+                &msg.head_sha,
+                &msg.name,
+                &msg.status,
+                &msg.conclusion,
+                &msg.details_url,
+            )
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(WriteAck { ok: true, detail }))
+    }
+
+    async fn comment(
+        &self,
+        req: Request<ForgeCommentRequest>,
+    ) -> Result<Response<WriteAck>, Status> {
+        let (forge, repo, msg) = adapter_for!(self, req);
+        let detail = forge
+            .comment(&repo, msg.number, &msg.body)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(WriteAck { ok: true, detail }))
+    }
+
+    async fn set_deployment(
+        &self,
+        req: Request<ForgeSetDeploymentRequest>,
+    ) -> Result<Response<WriteAck>, Status> {
+        let (forge, repo, msg) = adapter_for!(self, req);
+        let detail = forge
+            .set_deployment(
+                &repo,
+                &msg.head_sha,
+                &msg.r#ref,
+                &msg.environment,
+                &msg.state,
+                &msg.url,
+                &msg.log_url,
+                &msg.description,
+            )
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(WriteAck { ok: true, detail }))
+    }
+
+    // ── discovery, for the routed forge only ──────────────────────────────────
+    //
+    // Each checks `capabilities()` first and answers FAILED_PRECONDITION when the
+    // surface is absent. That is the distinction the capability flag buys: a
+    // forge without an issue tracker is not a broken forge, and a fan-out that
+    // asked anyway should be able to tell those apart without parsing a message.
+
+    async fn list_repos(
+        &self,
+        req: Request<ListForgeReposRequest>,
+    ) -> Result<Response<ListReposResponse>, Status> {
+        let (forge, _repo, msg) = adapter_for!(self, req);
+        let repos = forge
+            .list_repos(&msg.owners, &msg.labels)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(ListReposResponse { repos }))
+    }
+
+    async fn list_issues(
+        &self,
+        req: Request<ListForgeIssuesRequest>,
+    ) -> Result<Response<ListIssuesResponse>, Status> {
+        let (forge, _repo, msg) = adapter_for!(self, req);
+        require_capability(&*forge, "issues", |c| c.issues).await?;
+        let issues = forge
+            .list_issues(&msg.owners, &msg.labels, &msg.for_users)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(ListIssuesResponse { issues }))
+    }
+
+    async fn list_pull_requests(
+        &self,
+        req: Request<ListForgePullRequestsRequest>,
+    ) -> Result<Response<ListPullRequestsResponse>, Status> {
+        let (forge, _repo, msg) = adapter_for!(self, req);
+        let prs = forge
+            .list_pull_requests(&msg.owners, &msg.labels, &msg.for_users)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(ListPullRequestsResponse { prs }))
+    }
+}
+
+/// Reject an optional surface the routed adapter does not declare, BEFORE
+/// attempting it.
+///
+/// `FAILED_PRECONDITION`, not `UNIMPLEMENTED`: the RPC exists and this server
+/// serves it — it is the forge behind it that has no such surface. A caller that
+/// gated on [`Forge::capabilities`] never sees this; it is the backstop for one
+/// that did not, and it names the capability so the fix is obvious.
+async fn require_capability(
+    forge: &dyn Forge,
+    name: &str,
+    get: impl Fn(&crate::ForgeCapabilities) -> bool,
+) -> Result<(), Status> {
+    let caps = forge.capabilities().await.map_err(to_status)?;
+    if get(&caps) {
+        return Ok(());
+    }
+    Err(Status::failed_precondition(format!(
+        "{:?} does not provide `{name}` (ForgeCapabilities.{name} = false); \
+         call GetCapabilities before this RPC",
+        forge.kind(),
+    )))
+}
+
+/// Read a metadata value as a `String` (ASCII), if present and non-empty.
+fn meta_str(meta: &MetadataMap, key: &str) -> Option<String> {
+    meta.get(key)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+}
+
+/// A forge-op error becomes an internal gRPC status (the message is already the
+/// adapter's human-readable cause).
+fn to_status(e: ForgeError) -> Status {
+    Status::internal(e.to_string())
+}
