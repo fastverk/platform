@@ -37,6 +37,22 @@ in this PR.
 | service-finder | imported | [fastverk/service-finder](https://github.com/fastverk/service-finder) | `abc764147a63ef0c48b84ad102010980ed8d5415` | service_finder | 0.0.1 | cluster 1; dir is `service-finder`, Bazel name is `service_finder`; source has no `ci.yml` — `codegen-drift.yml` (`cargo run -p codegen`) + `publish.yml`; tags are `service-finder-client-v0.0.1`–`v0.0.3` (Rust client crate), not the Bazel module; not on the registry |
 | wave | imported | [fastverk/wave](https://github.com/fastverk/wave) | `c689d650fe33e34507c42d3dcb65c56954454a07` | wave | 0.1.0 | cluster 1; source CI is `bazel test //...` on Linux and macOS; tags include `v0.0.1`, `v0.1.0`, `v0.2.0`; MODULE.bazel on HEAD is `0.1.0` (kept); registry still at 0.0.1 |
 
+### All four source repos are retired
+
+Each source repo's default-branch HEAD equalled its Source SHA above at
+retirement, so the imported trees and the sources were identical and no work
+was stranded. Each now carries a README banner and a `retired` workflow that
+fails a pull request touching anything but that banner. **This vehicle is the
+edit surface.**
+
+The remotes keep their history and every tag: published registry versions
+resolve through the per-repo tags, and `git_override` pins still point at
+them. For `service-finder` the tags are the Rust client crate's
+(`service-finder-client-v*`), not the Bazel module's, which is not on the
+registry. They are deliberately **not** archived — that waits until this
+vehicle publishes a release from its own `<module>/vX.Y.Z` tag. See
+[Consolidation](https://docs.fastverk.com/consolidation.html).
+
 ## Optional later
 
 Not imported in this PR. `geetch` is private (404 from this token); leave
@@ -149,3 +165,13 @@ git subtree pull --prefix=<dir> https://github.com/fastverk/<dir>.git main
 
 No `--squash` — squashing destroys the merge base for future subtree
 pulls. Private/unreachable sources (e.g. `geetch`) are warnings only.
+
+**Now that all four sources are retired, a drift report means something
+different.** It used to mean *this vehicle is stale, pull from source*. It
+now means *someone committed to a retired repo* — the `retired` check was
+bypassed. Replay that commit here, then revert it at source. The audit is
+unchanged; only the reading is. Treating a post-retirement drift report as a
+routine subtree pull would make the retired repo authoritative again.
+
+`geetch` is the exception: it is `pending`, not retired, so a report about it
+still carries the original meaning.

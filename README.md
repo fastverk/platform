@@ -46,8 +46,11 @@ One subdirectory per module. Each imported tree keeps the source repo's
 `MODULE.bazel` pins, license, and tests. See [LEDGER.md](LEDGER.md) for which
 modules are in the tree today and which are follow-up imports.
 
-Cluster 1 is imported (`forge`, `tracker`, `service-finder`, `wave`). Source
-repos are not deleted or archived by this work.
+Cluster 1 is imported (`forge`, `tracker`, `service-finder`, `wave`), and
+**all four source repos are now retired: this vehicle is the edit surface.**
+They are not deleted or archived — they keep their history and tags so
+published registry versions and `git_override` pins keep resolving. See
+[Consolidation](https://docs.fastverk.com/consolidation.html).
 
 ## Tags
 
