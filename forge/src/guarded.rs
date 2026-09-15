@@ -93,51 +93,199 @@ impl GuardedProvisioner for GuardedGeetchProvisioner {
         &self,
         request: GetProvisionSnapshotRequest,
     ) -> Result<GetProvisionSnapshotResponse, Status> {
-        Ok(self
+        let response = self
             .client()
-            .get_provision_snapshot(self.request(request))
+            .get_provision_snapshot(self.request(request.clone()))
             .await?
-            .into_inner())
+            .into_inner();
+        if !snapshot_matches(&response, &request) {
+            return Err(Status::data_loss("invalid guarded repository snapshot"));
+        }
+        Ok(response)
     }
     async fn archive(
         &self,
         request: GuardedArchiveRepoRequest,
     ) -> Result<GuardedArchiveRepoResponse, Status> {
-        Ok(self
+        let response = self
             .client()
-            .guarded_archive_repo(self.request(request))
+            .guarded_archive_repo(self.request(request.clone()))
             .await?
-            .into_inner())
+            .into_inner();
+        let expected = crate::pb::provision_mutation_receipt::Request::Archive(request);
+        if !response
+            .receipt
+            .as_ref()
+            .is_some_and(|r| receipt_valid(r) && r.request.as_ref() == Some(&expected))
+        {
+            return Err(Status::data_loss("invalid guarded mutation receipt"));
+        }
+        Ok(response)
     }
     async fn delete(
         &self,
         request: GuardedDeleteRepoRequest,
     ) -> Result<GuardedDeleteRepoResponse, Status> {
-        Ok(self
+        let response = self
             .client()
-            .guarded_delete_repo(self.request(request))
+            .guarded_delete_repo(self.request(request.clone()))
             .await?
-            .into_inner())
+            .into_inner();
+        let expected = crate::pb::provision_mutation_receipt::Request::Delete(request);
+        if !response
+            .receipt
+            .as_ref()
+            .is_some_and(|r| receipt_valid(r) && r.request.as_ref() == Some(&expected))
+        {
+            return Err(Status::data_loss("invalid guarded mutation receipt"));
+        }
+        Ok(response)
     }
     async fn ensure_protection(
         &self,
         request: GuardedEnsureProtectionRequest,
     ) -> Result<GuardedEnsureProtectionResponse, Status> {
-        Ok(self
+        let response = self
             .client()
-            .guarded_ensure_protection(self.request(request))
+            .guarded_ensure_protection(self.request(request.clone()))
             .await?
-            .into_inner())
+            .into_inner();
+        let expected = crate::pb::provision_mutation_receipt::Request::Protection(request);
+        if !response
+            .receipt
+            .as_ref()
+            .is_some_and(|r| receipt_valid(r) && r.request.as_ref() == Some(&expected))
+        {
+            return Err(Status::data_loss("invalid guarded mutation receipt"));
+        }
+        Ok(response)
     }
     async fn mutation(
         &self,
         request: GetProvisionMutationRequest,
     ) -> Result<GetProvisionMutationResponse, Status> {
-        Ok(self
+        let response = self
             .client()
-            .get_provision_mutation(self.request(request))
+            .get_provision_mutation(self.request(request.clone()))
             .await?
-            .into_inner())
+            .into_inner();
+        if !response.receipt.as_ref().is_some_and(|r| {
+            receipt_valid(r)
+                && r.request.as_ref().is_some_and(|input| {
+                    let (repo, revision, key) = receipt_identity(input);
+                    repo == &request.repo
+                        && revision
+                            .as_ref()
+                            .is_some_and(|v| v.incarnation == request.incarnation)
+                        && key == request.idempotency_key
+                })
+        }) {
+            return Err(Status::data_loss(
+                "guarded lookup returned an unrelated or invalid receipt",
+            ));
+        }
+        Ok(response)
+    }
+}
+
+fn revision_valid(value: &Option<crate::pb::ProvisionRevision>) -> bool {
+    value
+        .as_ref()
+        .is_some_and(|v| !v.incarnation.is_empty() && !v.configuration.is_empty())
+}
+fn snapshot_matches(
+    response: &GetProvisionSnapshotResponse,
+    request: &GetProvisionSnapshotRequest,
+) -> bool {
+    if response.branch != request.branch {
+        return false;
+    }
+    if !response.found {
+        return response.repo.is_none()
+            && response.revision.is_none()
+            && !response.protection_found
+            && response.protection.is_none();
+    }
+    request.repo.is_some()
+        && response
+            .repo
+            .as_ref()
+            .is_some_and(|r| r.repo == request.repo)
+        && revision_valid(&response.revision)
+        && response.protection_found == response.protection.is_some()
+        && response
+            .protection
+            .as_ref()
+            .is_none_or(|p| !request.branch.is_empty() && p.branch == request.branch)
+}
+fn receipt_identity(
+    input: &crate::pb::provision_mutation_receipt::Request,
+) -> (
+    &Option<crate::pb::RepoRef>,
+    &Option<crate::pb::ProvisionRevision>,
+    &str,
+) {
+    use crate::pb::provision_mutation_receipt::Request::*;
+    match input {
+        Archive(r) => (&r.repo, &r.expected, &r.idempotency_key),
+        Delete(r) => (&r.repo, &r.expected, &r.idempotency_key),
+        Protection(r) => (&r.repo, &r.expected, &r.idempotency_key),
+    }
+}
+fn receipt_valid(receipt: &crate::pb::ProvisionMutationReceipt) -> bool {
+    use crate::pb::{
+        provision_mutation_receipt::{Request as Input, Result as Output},
+        ProvisionMutationPhase as Phase,
+    };
+    let Some(input) = receipt.request.as_ref() else {
+        return false;
+    };
+    let (repo, expected, key) = receipt_identity(input);
+    if receipt.operation_id.is_empty()
+        || !receipt
+            .actor
+            .as_ref()
+            .is_some_and(|a| !a.issuer.is_empty() && !a.subject.is_empty())
+        || repo.is_none()
+        || !revision_valid(expected)
+        || key.is_empty()
+    {
+        return false;
+    }
+    match Phase::try_from(receipt.phase) {
+        Ok(Phase::Pending | Phase::Failed | Phase::ReconciliationRequired) => {
+            receipt.result.is_none() && receipt.resulting_revision.is_none()
+        }
+        Ok(Phase::Succeeded) => {
+            let surviving_revision = revision_valid(&receipt.resulting_revision)
+                && receipt.resulting_revision.as_ref().map(|v| &v.incarnation)
+                    == expected.as_ref().map(|v| &v.incarnation);
+            match (input, receipt.result.as_ref()) {
+                (Input::Archive(_), Some(Output::Archived(r))) => {
+                    surviving_revision
+                        && r.repo.as_ref().is_some_and(|r| {
+                            &r.repo == repo
+                                && r.lifecycle == crate::pb::RepoLifecycle::Archived as i32
+                        })
+                }
+                (Input::Delete(r), Some(Output::Deleted(result))) => {
+                    result.confirmed
+                        && receipt.resulting_revision.is_none()
+                        && repo
+                            .as_ref()
+                            .is_some_and(|repo| r.confirm_name == repo.name)
+                }
+                (Input::Protection(r), Some(Output::ProtectionSaved(result))) => {
+                    surviving_revision
+                        && result
+                            .protection
+                            .as_ref()
+                            .is_some_and(|p| p.branch == r.branch)
+                }
+                _ => false,
+            }
+        }
+        _ => false,
     }
 }
 
@@ -323,5 +471,125 @@ mod tests {
         );
         stop.send(()).unwrap();
         server.await.unwrap();
+    }
+    #[test]
+    fn snapshots_reject_wrong_identity_or_incomplete_versions() {
+        use crate::pb::{Protection, ProvisionRevision, ProvisionedRepo, RepoRef};
+        let request = GetProvisionSnapshotRequest {
+            repo: Some(RepoRef {
+                forge: 3,
+                owner: "acme".into(),
+                name: "widgets".into(),
+                host: String::new(),
+            }),
+            branch: "main".into(),
+        };
+        let valid = GetProvisionSnapshotResponse {
+            found: true,
+            repo: Some(ProvisionedRepo {
+                repo: request.repo.clone(),
+                ..Default::default()
+            }),
+            revision: Some(ProvisionRevision {
+                incarnation: "original".into(),
+                configuration: "7".into(),
+            }),
+            branch: "main".into(),
+            protection_found: false,
+            protection: None,
+        };
+        assert!(snapshot_matches(&valid, &request));
+        let mut wrong = valid.clone();
+        wrong.repo.as_mut().unwrap().repo.as_mut().unwrap().name = "other".into();
+        assert!(!snapshot_matches(&wrong, &request));
+        wrong = valid.clone();
+        wrong.revision = None;
+        assert!(!snapshot_matches(&wrong, &request));
+        wrong = valid.clone();
+        wrong.protection_found = true;
+        assert!(!snapshot_matches(&wrong, &request));
+        wrong.protection = Some(Protection {
+            branch: "other".into(),
+            ..Default::default()
+        });
+        assert!(!snapshot_matches(&wrong, &request));
+        wrong = valid.clone();
+        wrong.found = false;
+        assert!(!snapshot_matches(&wrong, &request));
+        assert!(snapshot_matches(
+            &GetProvisionSnapshotResponse {
+                branch: "main".into(),
+                ..Default::default()
+            },
+            &request
+        ));
+    }
+
+    #[test]
+    fn successful_delete_receipts_require_confirmed_matching_outcomes() {
+        use crate::pb::provision_mutation_receipt::{Request as Input, Result as Output};
+        use crate::pb::{
+            DeletedProvisionResult, ProvisionActor, ProvisionMutationPhase,
+            ProvisionMutationReceipt, ProvisionRevision, RepoRef,
+        };
+        let valid = ProvisionMutationReceipt {
+            operation_id: "operation-1".into(),
+            actor: Some(ProvisionActor {
+                issuer: "issuer".into(),
+                subject: "caller".into(),
+            }),
+            request: Some(Input::Delete(GuardedDeleteRepoRequest {
+                repo: Some(RepoRef {
+                    forge: 3,
+                    owner: "acme".into(),
+                    name: "widgets".into(),
+                    host: String::new(),
+                }),
+                expected: Some(ProvisionRevision {
+                    incarnation: "original".into(),
+                    configuration: "7".into(),
+                }),
+                confirm_name: "widgets".into(),
+                idempotency_key: "delete-once".into(),
+            })),
+            phase: ProvisionMutationPhase::Succeeded as i32,
+            result: Some(Output::Deleted(DeletedProvisionResult { confirmed: true })),
+            ..Default::default()
+        };
+        assert!(receipt_valid(&valid));
+        let mut wrong = valid.clone();
+        wrong.result = None;
+        assert!(!receipt_valid(&wrong));
+        wrong = valid.clone();
+        wrong.phase = 999;
+        assert!(!receipt_valid(&wrong));
+        wrong = valid.clone();
+        wrong.actor = None;
+        assert!(!receipt_valid(&wrong));
+        wrong = valid.clone();
+        wrong.result = Some(Output::Deleted(DeletedProvisionResult { confirmed: false }));
+        assert!(!receipt_valid(&wrong));
+        wrong = valid.clone();
+        wrong.resulting_revision = Some(ProvisionRevision {
+            incarnation: "replacement".into(),
+            configuration: "1".into(),
+        });
+        assert!(!receipt_valid(&wrong));
+        wrong = valid.clone();
+        wrong.phase = ProvisionMutationPhase::Pending as i32;
+        assert!(
+            !receipt_valid(&wrong),
+            "pending must not carry a confirmed outcome"
+        );
+        wrong.result = None;
+        assert!(
+            receipt_valid(&wrong),
+            "pending remains an explicit non-success state"
+        );
+        wrong = valid;
+        if let Some(Input::Delete(r)) = &mut wrong.request {
+            r.confirm_name = "different".into();
+        }
+        assert!(!receipt_valid(&wrong));
     }
 }
