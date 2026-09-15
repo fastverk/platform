@@ -26,6 +26,10 @@
 //! assert!(f.calls().contains(&"open_change".to_string()));
 //! ```
 
+/// Canonical protobuf codec for conformance fixtures across isolated build graphs.
+/// This lets backend fixtures translate messages without copying DTO fields.
+pub use prost::Message as WireMessage;
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 

@@ -7,8 +7,9 @@ use async_trait::async_trait;
 use tonic::{
     metadata::{Ascii, MetadataValue},
     transport::Channel,
-    Request, Status,
+    Request,
 };
+pub use tonic::{Code, Status};
 
 use crate::pb::guarded_forge_provision_service_client::GuardedForgeProvisionServiceClient;
 pub use crate::pb::{
