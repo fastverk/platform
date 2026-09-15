@@ -17,6 +17,15 @@ bazel_dep(name = "bazel_skylib", version = "1.8.2")
 bazel_dep(name = "rules_rust", version = "0.70.0")
 bazel_dep(name = "protobuf", version = "33.4")
 
+# Guarded provisioning is authored in the public contract owner. This draft pin
+# is replaced only after the contract and its runtime conformance are accepted.
+bazel_dep(name = "fastverk_contracts", version = "0.0.1")
+git_override(
+    module_name = "fastverk_contracts",
+    commit = "b29ea43aa54a8f77f3771aea01006a971d9038e7",
+    remote = "https://github.com/fastverk/contracts.git",
+)
+
 # Hermetic CC toolchain via zig cc — cross-compiles the forge-gateway rust binary
 # to linux/amd64 (glibc gnu.2.28) for the OCI image, on any host. Same as
 # botnoc/agents.

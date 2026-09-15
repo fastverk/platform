@@ -37,3 +37,16 @@ bazel_dep(name = "forge", version = "0.0.1")
 
 Then depend on `@forge//:forge` from a `rust_library`. For Cargo/IDE iteration the
 crate also builds standalone (`cargo build`).
+
+## Shared schema inputs
+
+The build compiles `forge.v1` from `fastverk/contracts`, pinned in this module's
+`MODULE.bazel`. The guarded provisioning service is a draft contract dependency;
+its generated client/server types do not establish adapter or serving support.
+
+Bazel stages the schema inputs automatically. For Cargo and IDE builds, check out
+that same contracts revision and set `FASTVERK_CONTRACTS_PROTO_DIR` to its absolute
+`proto` directory before running Cargo. The build fails when this input is
+missing; it does not silently fall back to historical local schema copies.
+Existing local proto export labels remain for legacy consumers pending their
+separate migration.
