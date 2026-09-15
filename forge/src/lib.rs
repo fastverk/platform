@@ -44,6 +44,9 @@ pub mod testing;
 #[cfg(feature = "testing")]
 pub mod conformance;
 
+#[cfg(feature = "testing")]
+pub mod guarded_conformance;
+
 pub use pb::{ChangeRef, ChangeState, CiStatus, FileBlob, Forge as ForgeKind, RepoRef, Trigger};
 // Optional-surface declaration + the discovery DTOs the folded-in read RPCs
 // return. `Issue`/`PullRequest`/`Repository` were defined in discovery.proto for

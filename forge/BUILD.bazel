@@ -115,3 +115,16 @@ rust_test(
         normal_dev = True,
     ),
 )
+
+# Shared lifecycle precondition/receipt cases. Server consumers import the same
+# functions with a real fixture; this target exercises the in-memory model.
+rust_test(
+    name = "guarded_conformance",
+    srcs = ["tests/guarded_conformance.rs"],
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = [":forge_testing"] + all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)
