@@ -20,6 +20,7 @@ pub mod gateway;
 // geetch — the platform's own forge. Unlike github/gitlab this adapter maps
 // nothing: geetch SERVES forge.v1 natively, so it is a gRPC passthrough.
 pub mod geetch;
+pub mod guarded;
 pub mod github;
 pub mod gitlab;
 pub mod provision;
@@ -42,6 +43,9 @@ pub mod testing;
 // nothing about the shared contract, because a copy drifts.
 #[cfg(feature = "testing")]
 pub mod conformance;
+
+#[cfg(feature = "testing")]
+pub mod guarded_conformance;
 
 pub use pb::{ChangeRef, ChangeState, CiStatus, FileBlob, Forge as ForgeKind, RepoRef, Trigger};
 // Optional-surface declaration + the discovery DTOs the folded-in read RPCs

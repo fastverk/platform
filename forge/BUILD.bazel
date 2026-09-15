@@ -18,14 +18,11 @@ cargo_build_script(
     srcs = ["build.rs"],
     build_script_env = {
         "PROTOC": "$(execpath @protobuf//:protoc)",
+        "FORGE_PROTO_FILE": "$(execpath @fastverk_contracts//proto/forge/v1:forge.proto)",
     },
     data = [
-        "//proto/forge/v1:forge.proto",
-        "//proto/forge/v1:provision.proto",
-        # events.proto imports discovery.proto, so both must be staged for protoc
-        # even though only events is named in a service definition here.
-        "//proto/forge/v1:discovery.proto",
-        "//proto/forge/v1:events.proto",
+        "@fastverk_contracts//proto/forge/v1:forge.proto",
+        "@fastverk_contracts//proto/forge/v1:srcs",
     ],
     edition = "2021",
     tools = ["@protobuf//:protoc"],
@@ -68,6 +65,7 @@ rust_test(
     name = "forge_test",
     crate = ":forge",
     edition = "2021",
+    deps = all_crate_deps(normal_dev = True),
 )
 
 # The same crate with the `testing` feature on, exposing forge::testing::FakeForge.
@@ -110,6 +108,19 @@ rust_test(
 rust_test(
     name = "geetch_adapter",
     srcs = ["tests/geetch_adapter.rs"],
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = [":forge_testing"] + all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+# Shared lifecycle precondition/receipt cases. Server consumers import the same
+# functions with a real fixture; this target exercises the in-memory model.
+rust_test(
+    name = "guarded_conformance",
+    srcs = ["tests/guarded_conformance.rs"],
     edition = "2021",
     proc_macro_deps = all_crate_deps(proc_macro = True),
     deps = [":forge_testing"] + all_crate_deps(
