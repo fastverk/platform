@@ -440,3 +440,17 @@ impl FakeForge {
         .unwrap_or(false)
     }
 }
+
+/// Enter this crate's reactor for shared cases on a consumer's current thread.
+/// Keep this guard on that thread throughout the test. This is needed when
+/// Bazel resolves separate Tokio crates for the suite and backend fixture.
+pub fn enter_shared_runtime() -> tokio::runtime::EnterGuard<'static> {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("shared conformance runtime")
+    }).enter()
+}
