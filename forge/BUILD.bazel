@@ -65,6 +65,7 @@ rust_test(
     name = "forge_test",
     crate = ":forge",
     edition = "2021",
+    deps = all_crate_deps(normal_dev = True),
 )
 
 # The same crate with the `testing` feature on, exposing forge::testing::FakeForge.
