@@ -18,6 +18,8 @@ struct Model {
     state: Mutex<State>,
 }
 struct State {
+    generation: u64,
+    incarnation: u64,
     snapshot: pb::GetProvisionSnapshotResponse,
     receipts: HashMap<String, pb::ProvisionMutationReceipt>,
 }
@@ -32,6 +34,8 @@ impl Model {
             pending_first: AtomicBool::new(false),
             repo: repo.clone(),
             state: Mutex::new(State {
+                generation: 1,
+                incarnation: 1,
                 snapshot: pb::GetProvisionSnapshotResponse {
                     found: true,
                     repo: Some(pb::ProvisionedRepo {
@@ -100,7 +104,8 @@ impl Model {
             Input::Archive(_) => {
                 state.snapshot.repo.as_mut().unwrap().lifecycle =
                     pb::RepoLifecycle::Archived as i32;
-                let n = state.receipts.len() + 2;
+                state.generation += 1;
+                let n = state.generation;
                 state.snapshot.revision.as_mut().unwrap().configuration =
                     format!("configuration-{n}");
                 (
@@ -149,6 +154,10 @@ impl GuardedProvisioner for Model {
         }
         let mut snapshot = self.state.lock().unwrap().snapshot.clone();
         snapshot.branch = request.branch;
+        if snapshot.branch != "main" {
+            snapshot.protection = None;
+            snapshot.protection_found = false;
+        }
         Ok(snapshot)
     }
     async fn archive(
@@ -205,3 +214,45 @@ impl Fixture for Model {
 forge::guarded_conformance_suite!(atomic_model, Model::new());
 
 forge::guarded_conformance_suite!(pending_model, Model::initially_pending());
+
+#[async_trait]
+impl forge::guarded_conformance::RevisionFixture for Model {
+    async fn legacy_protection(&self, spec: pb::ProtectionSpec) -> Result<(), Status> {
+        let mut state = self.state.lock().unwrap();
+        let protection = pb::Protection {
+            branch: "main".into(),
+            effective: Some(spec),
+            unsupported: Vec::new(),
+            ..Default::default()
+        };
+        if state.snapshot.protection.as_ref() != Some(&protection) {
+            state.generation += 1;
+            let generation = state.generation;
+            state.snapshot.revision.as_mut().unwrap().configuration =
+                format!("configuration-{generation}");
+            state.snapshot.protection_found = true;
+            state.snapshot.protection = Some(protection);
+        }
+        Ok(())
+    }
+    async fn recreate(&self) -> Result<(), Status> {
+        let mut state = self.state.lock().unwrap();
+        state.generation += 1;
+        state.incarnation += 1;
+        state.snapshot = pb::GetProvisionSnapshotResponse {
+            found: true,
+            repo: Some(pb::ProvisionedRepo {
+                repo: Some(self.repo.clone()),
+                lifecycle: pb::RepoLifecycle::Active as i32,
+                ..Default::default()
+            }),
+            revision: Some(pb::ProvisionRevision {
+                incarnation: format!("incarnation-{}", state.incarnation),
+                configuration: format!("configuration-{}", state.generation),
+            }),
+            ..Default::default()
+        };
+        Ok(())
+    }
+}
+forge::guarded_revision_conformance_suite!(revision_model, Model::new());

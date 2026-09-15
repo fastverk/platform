@@ -67,3 +67,11 @@ effects. `bazel test //:guarded_conformance` exercises these cases against an
 atomic in-memory lifecycle model. Protection, legacy-writer revision changes,
 delete/recreate, caller revocation/isolation, receipt retention, and restart
 reconciliation still require additional shared cases and serving implementations.
+
+Revision coordination adds `RevisionFixture` and
+`guarded_revision_conformance_suite!`. These three required cases drive the
+legacy service to change protection, restore earlier settings, and delete/recreate
+a repository. Each then proves an old deletion confirmation is rejected without
+changing the current snapshot. Backend fixtures must call their real legacy
+operations, not alter the guarded revision directly. The model passes these
+cases; serving backend verification remains pending.

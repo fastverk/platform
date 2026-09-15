@@ -344,3 +344,137 @@ macro_rules! guarded_conformance_suite {
         }
     };
 }
+
+/// Required controls for testing changes made through the legacy provisioning
+/// surface. Implement these with the real legacy service in backend fixtures;
+/// directly changing the guarded service's revision would not test coordination.
+#[async_trait::async_trait]
+pub trait RevisionFixture: Fixture + Sync {
+    async fn legacy_protection(&self, spec: pb::ProtectionSpec) -> Result<(), tonic::Status>;
+    /// Delete and recreate the same repository through its supported lifecycle.
+    async fn recreate(&self) -> Result<(), tonic::Status>;
+}
+
+async fn protection_snapshot(fx: &dyn RevisionFixture) -> GetProvisionSnapshotResponse {
+    fx.provisioner()
+        .snapshot(GetProvisionSnapshotRequest {
+            repo: Some(fx.repo()),
+            branch: "main".into(),
+        })
+        .await
+        .unwrap()
+}
+async fn rejects_old_delete(fx: &dyn RevisionFixture, old: Option<pb::ProvisionRevision>) {
+    let before = protection_snapshot(fx).await;
+    let result = fx
+        .provisioner()
+        .delete(GuardedDeleteRepoRequest {
+            repo: Some(fx.repo()),
+            expected: old,
+            confirm_name: fx.repo().name,
+            idempotency_key: "stale-confirmation".into(),
+        })
+        .await;
+    assert_eq!(result.unwrap_err().code(), Code::FailedPrecondition);
+    assert_eq!(protection_snapshot(fx).await, before);
+}
+
+pub async fn legacy_settings_invalidate_confirmation(fx: &dyn RevisionFixture) {
+    let before = protection_snapshot(fx).await;
+    // Toggle a supported field so this is a real change even on a protected repo.
+    let mut spec = before
+        .protection
+        .as_ref()
+        .and_then(|p| p.effective.clone())
+        .unwrap_or_default();
+    spec.block_force_push = !spec.block_force_push;
+    fx.legacy_protection(spec.clone()).await.unwrap();
+    let after = protection_snapshot(fx).await;
+    assert!(after.found && after.protection_found);
+    assert_eq!(
+        after
+            .protection
+            .unwrap()
+            .effective
+            .unwrap()
+            .block_force_push,
+        spec.block_force_push
+    );
+    let old = before.revision.as_ref().unwrap();
+    let new = after.revision.as_ref().unwrap();
+    assert_eq!(old.incarnation, new.incarnation);
+    assert_ne!(old.configuration, new.configuration);
+    rejects_old_delete(fx, before.revision).await;
+}
+
+pub async fn settings_reversion_keeps_confirmation_stale(fx: &dyn RevisionFixture) {
+    let spec = pb::ProtectionSpec {
+        block_force_push: true,
+        ..Default::default()
+    };
+    fx.legacy_protection(spec.clone()).await.unwrap();
+    let before = protection_snapshot(fx).await;
+    fx.legacy_protection(pb::ProtectionSpec {
+        block_force_push: false,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    fx.legacy_protection(spec).await.unwrap();
+    let after = protection_snapshot(fx).await;
+    assert_eq!(
+        before.protection, after.protection,
+        "the visible settings are restored"
+    );
+    assert_eq!(
+        before.revision.as_ref().unwrap().incarnation,
+        after.revision.as_ref().unwrap().incarnation
+    );
+    assert_ne!(
+        before.revision, after.revision,
+        "a reverted value must not revive an old confirmation"
+    );
+    rejects_old_delete(fx, before.revision).await;
+}
+
+pub async fn recreated_repository_rejects_original_confirmation(fx: &dyn RevisionFixture) {
+    let before = protection_snapshot(fx).await;
+    fx.recreate().await.unwrap();
+    let after = protection_snapshot(fx).await;
+    assert!(after.found);
+    assert_eq!(
+        before.repo.as_ref().unwrap().repo,
+        after.repo.as_ref().unwrap().repo
+    );
+    assert_ne!(
+        before.revision.as_ref().unwrap().incarnation,
+        after.revision.as_ref().unwrap().incarnation
+    );
+    rejects_old_delete(fx, before.revision).await;
+}
+
+#[macro_export]
+macro_rules! guarded_revision_conformance_suite {
+    ($name:ident, $fixture:expr) => {
+        mod $name {
+            use super::*;
+            #[tokio::test]
+            async fn legacy_settings_invalidate_confirmation() {
+                $crate::guarded_conformance::legacy_settings_invalidate_confirmation(&$fixture)
+                    .await;
+            }
+            #[tokio::test]
+            async fn settings_reversion_keeps_confirmation_stale() {
+                $crate::guarded_conformance::settings_reversion_keeps_confirmation_stale(&$fixture)
+                    .await;
+            }
+            #[tokio::test]
+            async fn recreated_repository_rejects_original_confirmation() {
+                $crate::guarded_conformance::recreated_repository_rejects_original_confirmation(
+                    &$fixture,
+                )
+                .await;
+            }
+        }
+    };
+}
